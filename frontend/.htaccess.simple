@@ -1,0 +1,27 @@
+# Configuración simple para React Router SPA
+RewriteEngine On
+
+# Permitir acceso a archivos estáticos
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+
+# Redirigir todo a index.html
+RewriteRule . /index.html [L]
+
+# Configurar headers para index.html
+<Files "index.html">
+  Header set Cache-Control "no-cache, no-store, must-revalidate"
+  Header set Pragma "no-cache"
+  Header set Expires 0
+</Files>
+
+# Configurar tipos MIME
+AddType application/javascript .js
+AddType text/css .css
+AddType application/json .json
+
+# Prevenir acceso a archivos sensibles
+<FilesMatch "\.(htaccess|htpasswd|ini|log|sh|inc|bak)$">
+  Order Allow,Deny
+  Deny from all
+</FilesMatch>

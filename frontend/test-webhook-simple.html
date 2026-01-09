@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prueba Simple del Webhook Server</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .button:hover {
+            background: #0056b3;
+        }
+        .result {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        .success {
+            border-color: #28a745;
+            background-color: #d4edda;
+        }
+        .error {
+            border-color: #dc3545;
+            background-color: #f8d7da;
+        }
+        .info {
+            background: #e3f2fd;
+            border: 1px solid #2196f3;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Prueba Simple del Webhook Server</h1>
+        
+        <div class="info">
+            <strong>Servidor:</strong> http://3.14.3.69:3001/api<br>
+            <strong>Estado:</strong> <span id="status">Verificando...</span>
+        </div>
+
+        <div>
+            <button class="button" onclick="testHealth()">🔍 Health Check</button>
+            <button class="button" onclick="testStats()">📊 Estadísticas</button>
+            <button class="button" onclick="testWebhook()">🧪 Test Webhook</button>
+            <button class="button" onclick="clearResults()">🗑️ Limpiar</button>
+        </div>
+
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://3.14.3.69:3001/api';
+        const AUTH_TOKEN = 'lab_webhook_2024_super_secret_key_bonelektroniks';
+
+        function addResult(title, data, isError = false) {
+            const resultsDiv = document.getElementById('results');
+            const resultDiv = document.createElement('div');
+            resultDiv.className = `result ${isError ? 'error' : 'success'}`;
+            resultDiv.innerHTML = `<strong>${title}</strong>\n${JSON.stringify(data, null, 2)}`;
+            resultsDiv.appendChild(resultDiv);
+        }
+
+        function clearResults() {
+            document.getElementById('results').innerHTML = '';
+        }
+
+        async function testHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/health`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                addResult('✅ Health Check', data);
+                document.getElementById('status').textContent = 'Funcionando';
+                document.getElementById('status').style.color = 'green';
+            } catch (error) {
+                addResult('❌ Health Check Error', { error: error.message }, true);
+                document.getElementById('status').textContent = 'Error';
+                document.getElementById('status').style.color = 'red';
+            }
+        }
+
+        async function testStats() {
+            try {
+                const response = await fetch(`${API_BASE}/webhooks/stats`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${AUTH_TOKEN}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                addResult('✅ Estadísticas', data);
+            } catch (error) {
+                addResult('❌ Estadísticas Error', { error: error.message }, true);
+            }
+        }
+
+        async function testWebhook() {
+            try {
+                const response = await fetch(`${API_BASE}/webhooks/test`, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${AUTH_TOKEN}`
+                    },
+                    body: JSON.stringify({
+                        type: 'solicitud.completed',
+                        solicitud_id: 1
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                addResult('✅ Test Webhook', data);
+            } catch (error) {
+                addResult('❌ Test Webhook Error', { error: error.message }, true);
+            }
+        }
+
+        // Probar health check automáticamente al cargar
+        window.onload = function() {
+            testHealth();
+        };
+    </script>
+</body>
+</html>

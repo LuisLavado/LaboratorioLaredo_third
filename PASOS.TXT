@@ -1,0 +1,153 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    PASOS PARA DESPLEGAR CON DOCKER
+═══════════════════════════════════════════════════════════════════════════════
+
+📋 PREREQUISITOS:
+   - Docker Desktop instalado y corriendo
+   - Git Bash o PowerShell
+   - Archivo .env configurado en la raíz del proyecto
+
+═══════════════════════════════════════════════════════════════════════════════
+🚀 PRIMER DESPLIEGUE (Primera vez)
+═══════════════════════════════════════════════════════════════════════════════
+
+1. CONFIGURAR .ENV:
+   - Copiar .env.example a .env (si no existe)
+   - Verificar credenciales de base de datos:
+     DB_CONNECTION=mysql
+     DB_HOST=mysql
+     DB_PORT=3306
+     DB_DATABASE=laboratoriolaredo
+     DB_USERNAME=root
+     DB_PASSWORD=root
+   
+   - Verificar configuración de Reverb/WebSocket:
+     BROADCAST_CONNECTION=reverb
+     REVERB_APP_ID=176084
+     REVERB_APP_KEY=ynws9ha5gsf0proyy0vk
+     REVERB_APP_SECRET=zitcbbtxs6zljlzhmrfy
+     REVERB_HOST="0.0.0.0"
+     REVERB_PORT=8080
+     REVERB_SCHEME=http
+
+2. CONSTRUIR IMÁGENES (primera vez o después de cambios en Dockerfile):
+   docker-compose build --no-cache
+
+   ⏱️  Esto toma 5-10 minutos. Construye:
+   - Contenedor MySQL (base de datos)
+   - Contenedor Backend (PHP + Apache + Laravel + Reverb)
+   - Contenedor Frontend (React + Nginx)
+
+3. LEVANTAR CONTENEDORES:
+   docker-compose up -d
+
+   ✅ Esto inicia:
+   - mysql: Base de datos en puerto 3306
+   - backend: API Laravel (8000) + WebSocket Reverb (8080)
+   - frontend: React app en puerto 5173
+
+4. VERIFICAR QUE ESTÉN CORRIENDO:
+   docker-compose ps
+
+   Debe mostrar 3 servicios "Up":
+   - laboratoriolaredo-mysql-1
+   - laboratoriolaredo-backend-1
+   - laboratoriolaredo-frontend-1
+
+5. DAR PERMISOS DE ESCRITURA (PowerShell):
+   docker-compose exec backend chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
+   docker-compose exec backend chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
+
+6. EJECUTAR MIGRACIONES Y SEEDERS:
+   docker-compose exec backend php artisan migrate --seed
+
+   ⚠️  Si hay error "database doesn't exist", espera 30 segundos y reintenta.
+       MySQL tarda en inicializarse la primera vez.
+
+7. GENERAR KEY DE APLICACIÓN:
+   docker-compose exec backend php artisan key:generate
+
+8. LIMPIAR CACHÉ:
+   docker-compose exec backend php artisan config:clear
+   docker-compose exec backend php artisan cache:clear
+   docker-compose exec backend php artisan route:clear
+   docker-compose exec backend php artisan optimize:clear
+
+9. CREAR STORAGE LINKS:
+   docker-compose exec backend php artisan storage:link
+
+═══════════════════════════════════════════════════════════════════════════════
+🔄 DESPLIEGUES POSTERIORES (Ya existe todo)
+═══════════════════════════════════════════════════════════════════════════════
+
+1. LEVANTAR CONTENEDORES:
+   docker-compose up -d
+
+2. SI CAMBIASTE CÓDIGO PHP:
+   docker-compose restart backend
+
+3. SI CAMBIASTE .ENV O docker-compose.yml:
+   docker-compose down
+   docker-compose up -d
+
+4. SI CAMBIASTE Dockerfile o package.json:
+   docker-compose build --no-cache
+   docker-compose up -d
+
+═══════════════════════════════════════════════════════════════════════════════
+🐛 COMANDOS ÚTILES DE DIAGNÓSTICO
+═══════════════════════════════════════════════════════════════════════════════
+
+VER LOGS EN TIEMPO REAL:
+   docker-compose logs -f backend
+   docker-compose logs -f frontend
+   docker-compose logs -f mysql
+
+VER ÚLTIMAS 50 LÍNEAS:
+   docker-compose logs backend --tail=50
+
+ENTRAR AL CONTENEDOR:
+   docker-compose exec backend bash
+   docker-compose exec frontend sh
+
+REINICIAR UN SERVICIO:
+   docker-compose restart backend
+   docker-compose restart frontend
+
+DETENER TODO:
+   docker-compose down
+
+DETENER Y BORRAR VOLÚMENES (⚠️  BORRA LA BD):
+   docker-compose down -v
+
+VERIFICAR ESTADO:
+   docker-compose ps
+
+═══════════════════════════════════════════════════════════════════════════════
+📡 URLS Y PUERTOS
+═══════════════════════════════════════════════════════════════════════════════
+
+Backend API:          http://localhost:8000
+Frontend:             http://localhost:5173
+WebSocket (Reverb):   ws://localhost:8080/app/176084
+MySQL:                localhost:3306
+
+CREDENCIALES POR DEFECTO:
+- Admin:    admin@laboratorio.com / admin12345
+- Lab:      lab@laboratorio.com / lab12345
+- Doctor:   (crear desde panel admin)
+
+═══════════════════════════════════════════════════════════════════════════════
+💡 NOTAS IMPORTANTES
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ La base de datos se crea automáticamente con Docker (no manual)
+✅ Los datos de MySQL persisten en ./mysql_data (no se pierden al reiniciar)
+✅ En Windows, usar PowerShell para evitar problemas con rutas
+✅ Reverb (WebSocket) se inicia automáticamente con el backend
+✅ Si cambias eventos/broadcasting, reinicia: docker-compose restart backend
+✅ Frontend se reconstruye automáticamente en build (npm run build)
+
+⚠️  Si tienes problemas con permisos en storage, vuelve a ejecutar el paso 5
+⚠️  Si WebSocket no conecta, verifica que REVERB_HOST="0.0.0.0" en .env
+⚠️  Si frontend no carga, verifica logs: docker-compose logs frontend

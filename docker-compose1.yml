@@ -1,0 +1,32 @@
+networks:
+  dokploy-network:
+    external: true
+
+services:
+  backend:
+    build: .
+    restart: always
+    networks:
+      - dokploy-network
+    env_file:
+      - .env
+    volumes:
+      - ../files/storage:/var/www/html/storage
+    labels:
+      # API Backend (HTTP)
+      traefik.enable: "true"
+      traefik.http.routers.backend.rule: "Host(`labbackend.shiroharu.me`)"
+      traefik.http.routers.backend.entrypoints: "websecure"
+      traefik.http.routers.backend.tls.certresolver: "letsencrypt"
+      traefik.http.routers.backend.service: "backend-http"
+      traefik.http.services.backend-http.loadbalancer.server.port: "8000"
+
+      # WebSocket (Reverb) — enrutar por path /app para diferenciar del API
+      traefik.http.routers.backend-ws.rule: "Host(`labbackend.shiroharu.me`) && PathPrefix(`/app`)"
+      traefik.http.routers.backend-ws.entrypoints: "websecure"
+      traefik.http.routers.backend-ws.tls.certresolver: "letsencrypt"
+      traefik.http.routers.backend-ws.service: "backend-ws"
+      traefik.http.services.backend-ws.loadbalancer.server.port: "8080"
+      
+      # Especificar la red Docker que Traefik debe usar
+      traefik.docker.network: "dokploy-network"

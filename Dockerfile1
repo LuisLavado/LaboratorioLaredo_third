@@ -1,0 +1,146 @@
+FROM php:8.2-apache
+
+# Instalar dependencias
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    libzip-dev \
+    zip \
+    unzip \
+    default-mysql-client \
+    supervisor \
+    && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip
+
+# Copiar Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Configurar Apache
+RUN a2enmod rewrite headers
+RUN sed -i 's/Listen 80/Listen 8000/g' /etc/apache2/ports.conf
+RUN echo "ServerName labbackend.shiroharu.me" >> /etc/apache2/apache2.conf
+
+# Crear configuración del VirtualHost usando heredoc
+COPY <<EOF /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:8000>
+    ServerAdmin webmaster@localhost
+    ServerName labbackend.shiroharu.me
+    DocumentRoot /var/www/html/public
+
+    <Directory /var/www/html/public>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog \${APACHE_LOG_DIR}/error.log
+    CustomLog \${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+EOF
+
+# Habilitar AllowOverride All en apache2.conf
+RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
+
+# Establecer directorio de trabajo
+WORKDIR /var/www/html
+
+# Copiar código
+COPY . .
+
+# Crear estructura completa de directorios de Laravel antes de composer install
+RUN mkdir -p storage/framework/cache/data && \
+    mkdir -p storage/framework/sessions && \
+    mkdir -p storage/framework/testing && \
+    mkdir -p storage/framework/views && \
+    mkdir -p storage/logs && \
+    mkdir -p storage/app/public && \
+    mkdir -p storage/app/temp && \
+    mkdir -p storage/fonts && \
+    mkdir -p bootstrap/cache && \
+    chmod -R 775 storage && \
+    chmod -R 775 bootstrap/cache
+
+# Instalar dependencias de Composer
+RUN composer install --no-dev --optimize-autoloader
+
+# Establecer permisos correctos para storage (después de composer)
+RUN chown -R www-data:www-data /var/www/html/storage && \
+    chown -R www-data:www-data /var/www/html/bootstrap/cache
+
+# Crear directorios de logs y dar permisos
+RUN mkdir -p /var/log/supervisor /var/log/apache2 && \
+    touch /var/log/supervisor/supervisord.log && \
+    touch /var/log/reverb.log /var/log/reverb_error.log && \
+    chown -R www-data:www-data /var/log/supervisor /var/log/reverb.log /var/log/reverb_error.log
+
+# Copiar configuración de supervisor
+COPY <<EOF /etc/supervisor/conf.d/supervisord.conf
+[supervisord]
+nodaemon=true
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+user=root
+
+[program:apache2]
+command=/bin/bash -c "source /etc/apache2/envvars && exec /usr/sbin/apache2 -D FOREGROUND"
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/apache2/error.log
+stdout_logfile=/var/log/apache2/access.log
+
+[program:reverb]
+command=php /var/www/html/artisan reverb:start --host=0.0.0.0 --port=8080
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/reverb_error.log
+stdout_logfile=/var/log/reverb.log
+user=www-data
+environment=APP_ENV=production
+EOF
+
+# Copiar script de inicio
+COPY <<EOF /start.sh
+#!/bin/bash
+set -e
+
+echo "🚀 Iniciando contenedor Laravel..."
+
+# Garantizar permisos antes de iniciar (como root)
+echo "📝 Configurando permisos..."
+chown -R www-data:www-data /var/www/html/storage
+chown -R www-data:www-data /var/www/html/bootstrap/cache
+chmod -R 775 /var/www/html/storage
+chmod -R 775 /var/www/html/bootstrap/cache
+
+# Verificar que .env existe
+if [ ! -f /var/www/html/.env ]; then
+    echo "⚠️  ADVERTENCIA: No se encontró .env, copiando desde .env.example"
+    cp /var/www/html/.env.example /var/www/html/.env
+    php artisan key:generate
+fi
+
+# Limpiar cache (ignorar errores de views que no existen)
+echo "🧹 Limpiando cache..."
+php artisan config:clear || true
+php artisan route:clear || true
+php artisan cache:clear || true
+
+# Verificar configuración
+echo "🔍 Verificando configuración..."
+php artisan --version
+
+echo "✅ Configuración completa, iniciando servicios..."
+
+# Iniciar supervisor (como root para que pueda gestionar procesos)
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+EOF
+
+RUN chmod +x /start.sh
+
+# Exponer puertos
+EXPOSE 8000 8080
+
+# Comando de inicio
+CMD ["/start.sh"]

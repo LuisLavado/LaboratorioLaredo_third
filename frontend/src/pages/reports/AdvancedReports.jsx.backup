@@ -1,0 +1,3076 @@
+import { useState, useEffect, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { reportsAPI, examsAPI, patientsAPI, usersAPI, categoriesAPI, servicesAPI } from '../../services/api';
+import { Link } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
+import {
+  ArrowPathIcon,
+  DocumentArrowDownIcon,
+  CalendarIcon,
+  UserGroupIcon,
+  UserIcon,
+  BeakerIcon,
+  ClipboardDocumentCheckIcon,
+  TagIcon,
+  FunnelIcon,
+  XMarkIcon
+} from '@heroicons/react/24/outline';
+import toast from 'react-hot-toast';
+import ServicesSearchModal from '../../components/services/ServicesSearchModal';
+import ReportCharts from '../../components/charts/ReportCharts';
+
+export default function AdvancedReports() {
+  const { user, isDoctor } = useAuth();
+  // Estados para los filtros
+  const [dateRange, setDateRange] = useState([
+    // Fecha de inicio (30 días atrás)
+    {
+      format: (format) => {
+        const date = new Date(new Date().setDate(new Date().getDate() - 30));
+        return format === 'YYYY-MM-DD'
+          ? date.toISOString().split('T')[0]
+          : date.toLocaleDateString();
+      },
+      startDate: new Date(new Date().setDate(new Date().getDate() - 30)).toISOString().split('T')[0]
+    },
+    // Fecha de fin (hoy)
+    {
+      format: (format) => {
+        const date = new Date();
+        return format === 'YYYY-MM-DD'
+          ? date.toISOString().split('T')[0]
+          : date.toLocaleDateString();
+      },
+      endDate: new Date().toISOString().split('T')[0]
+    }
+  ]);
+  const [reportType, setReportType] = useState('general');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [selectedExams, setSelectedExams] = useState([]);
+  const [examOptions, setExamOptions] = useState([]);
+  const [showExamModal, setShowExamModal] = useState(false);
+  const [tempSelectedExams, setTempSelectedExams] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // Estados para servicios
+  const [selectedServices, setSelectedServices] = useState([]);
+  const [showServicesModal, setShowServicesModal] = useState(false);
+
+  // Estados específicos para reportes personalizados
+  const [customFilters, setCustomFilters] = useState({
+    patients: [],
+    doctors: [],
+    exams: [],
+    services: [],
+    categories: [],
+    dateRange: {
+      start: '',
+      end: ''
+    },
+    statusFilter: '',
+    includeMetrics: {
+      totalRequests: true,
+      avgProcessingTime: true,
+      popularExams: true,
+      patientDistribution: true,
+      dailyStats: true
+    }
+  });
+  const [showCustomModal, setShowCustomModal] = useState(false);
+
+  // Estados para modales de selección múltiple
+  const [showPatientsModal, setShowPatientsModal] = useState(false);
+  const [showDoctorsModal, setShowDoctorsModal] = useState(false);
+  const [showCustomExamsModal, setShowCustomExamsModal] = useState(false);
+  const [showCustomServicesModal, setShowCustomServicesModal] = useState(false);
+  const [showCategoriesModal, setShowCategoriesModal] = useState(false);
+
+  // Estados temporales para los modales
+  const [tempSelectedPatients, setTempSelectedPatients] = useState([]);
+  const [tempSelectedDoctors, setTempSelectedDoctors] = useState([]);
+  const [tempSelectedCustomExams, setTempSelectedCustomExams] = useState([]);
+  const [tempSelectedCustomServices, setTempSelectedCustomServices] = useState([]);
+  const [tempSelectedCategories, setTempSelectedCategories] = useState([]);
+
+  // Estados para búsqueda en modales
+  const [patientsSearchTerm, setPatientsSearchTerm] = useState('');
+  const [doctorsSearchTerm, setDoctorsSearchTerm] = useState('');
+  const [customExamsSearchTerm, setCustomExamsSearchTerm] = useState('');
+  const [customServicesSearchTerm, setCustomServicesSearchTerm] = useState('');
+  const [categoriesSearchTerm, setCategoriesSearchTerm] = useState('');
+
+  // Filtrar exámenes basados en el término de búsqueda
+  const filteredExams = useMemo(() => {
+    if (!searchTerm.trim()) return examOptions;
+
+    return examOptions.filter(exam =>
+      exam.label.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [examOptions, searchTerm]);
+
+  // Manejar la selección/deselección de un examen
+  const handleExamToggle = (exam) => {
+    console.log('handleExamToggle called with exam:', exam);
+
+    setTempSelectedExams(prev => {
+      // Verificar si el examen ya está seleccionado
+      const isSelected = prev.some(e => e.value === exam.value);
+      console.log('Exam is currently selected:', isSelected);
+
+      if (isSelected) {
+        // Si ya está seleccionado, lo quitamos de la lista
+        const newSelection = prev.filter(e => e.value !== exam.value);
+        console.log('New selection after removal:', newSelection);
+        return newSelection;
+      } else {
+        // Si no está seleccionado, lo añadimos a la lista
+        const newSelection = [...prev, exam];
+        console.log('New selection after addition:', newSelection);
+        return newSelection;
+      }
+    });
+  };
+
+  // Manejar seleccionar/deseleccionar todos los exámenes
+  const handleSelectAll = () => {
+    console.log('handleSelectAll called');
+    console.log('Current tempSelectedExams:', tempSelectedExams);
+    console.log('Current filteredExams:', filteredExams);
+
+    // Verificar si todos los exámenes filtrados están seleccionados
+    const allSelected = filteredExams.every(exam =>
+      tempSelectedExams.some(selected => selected.value === exam.value)
+    );
+
+    console.log('All exams are currently selected:', allSelected);
+
+    if (allSelected) {
+      // Si todos están seleccionados, deseleccionar los que están en la lista filtrada
+      const newSelection = tempSelectedExams.filter(selected =>
+        !filteredExams.some(exam => exam.value === selected.value)
+      );
+      console.log('New selection after deselecting all:', newSelection);
+      setTempSelectedExams(newSelection);
+    } else {
+      // Si no todos están seleccionados, añadir los que faltan
+      const newSelection = [...tempSelectedExams];
+
+      filteredExams.forEach(exam => {
+        if (!newSelection.some(selected => selected.value === exam.value)) {
+          newSelection.push(exam);
+        }
+      });
+
+      console.log('New selection after selecting all:', newSelection);
+      setTempSelectedExams(newSelection);
+    }
+  };
+
+  // Obtener lista de exámenes para el filtro
+  const { data: examsResponse, isLoading: examsLoading } = useQuery(
+    ['exams-list'],
+    () => examsAPI.getAll({ all: true }).then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true // Cargar siempre para tener los datos disponibles
+    }
+  );
+
+  // Obtener lista de pacientes para los filtros personalizados
+  const { data: patientsResponse, isLoading: patientsLoading } = useQuery(
+    ['patients-list'],
+    () => patientsAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de doctores para los filtros personalizados
+  const { data: doctorsResponse, isLoading: doctorsLoading } = useQuery(
+    ['doctors-list'],
+    () => usersAPI.getDoctors().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de categorías para los filtros personalizados
+  const { data: categoriesResponse, isLoading: categoriesLoading } = useQuery(
+    ['categories-list'],
+    () => categoriesAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de servicios para los filtros personalizados
+  const { data: servicesResponse, isLoading: servicesLoading } = useQuery(
+    ['services-list'],
+    () => servicesAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Actualizar opciones de exámenes cuando se carguen los datos
+  useEffect(() => {
+    console.log('Respuesta de exámenes:', examsResponse);
+
+    if (examsResponse?.examenes) {
+      // Filtrar exámenes activos si existe la propiedad activo
+      const activeExams = Array.isArray(examsResponse.examenes)
+        ? examsResponse.examenes.filter(exam => exam.activo !== false)
+        : [];
+
+      console.log('Exámenes activos:', activeExams);
+
+      // Mapear los exámenes a opciones para el selector con información adicional
+      const options = activeExams.map(exam => {
+        // Crear una etiqueta para mostrar en la interfaz (solo el nombre)
+        const label = exam.nombre || `Examen ID: ${exam.id}`;
+
+        // Incluir toda la información relevante del examen
+        return {
+          value: exam.id,
+          label: label,
+          name: exam.nombre,
+          code: exam.codigo,
+          category: exam.categoria?.nombre || (exam.categoria_id ? `Categoría ${exam.categoria_id}` : 'Sin categoría'),
+          categoria: exam.categoria?.nombre,
+          categoria_id: exam.categoria_id,
+          // Incluir el objeto original para acceder a todas sus propiedades
+          original: exam
+        };
+      });
+
+      setExamOptions(options);
+      console.log('Opciones de exámenes cargadas:', options);
+    }
+  }, [examsResponse]);
+
+  // Funciones para manejar la selección múltiple en modales personalizados
+  const createFilteredItems = (items, searchTerm, nameProperty = 'nombre') => {
+    if (!items || !Array.isArray(items)) return [];
+    
+    if (!searchTerm.trim()) return items;
+    
+    return items.filter(item => {
+      const name = item[nameProperty] || item.name || '';
+      const dni = item.dni || '';
+      const codigo = item.codigo || '';
+      const searchValue = searchTerm.toLowerCase();
+      
+      return name.toLowerCase().includes(searchValue) ||
+             dni.toLowerCase().includes(searchValue) ||
+             codigo.toLowerCase().includes(searchValue);
+    });
+  };
+
+  const createToggleHandler = (setTempSelected) => (item) => {
+    setTempSelected(prev => {
+      const isSelected = prev.some(selected => selected.id === item.id);
+      if (isSelected) {
+        return prev.filter(selected => selected.id !== item.id);
+      } else {
+        return [...prev, item];
+      }
+    });
+  };
+
+  const createSelectAllHandler = (filteredItems, tempSelected, setTempSelected) => () => {
+    const allSelected = filteredItems.every(item =>
+      tempSelected.some(selected => selected.id === item.id)
+    );
+
+    if (allSelected) {
+      // Deseleccionar todos los filtrados
+      setTempSelected(prev =>
+        prev.filter(selected =>
+          !filteredItems.some(item => item.id === selected.id)
+        )
+      );
+    } else {
+      // Seleccionar todos los filtrados
+      setTempSelected(prev => {
+        const newSelection = [...prev];
+        filteredItems.forEach(item => {
+          if (!newSelection.some(selected => selected.id === item.id)) {
+            newSelection.push(item);
+          }
+        });
+        return newSelection;
+      });
+    }
+  };
+
+  const createApplyHandler = (tempSelected, filterKey, setCustomFilters, setShowModal) => () => {
+    setCustomFilters(prev => ({
+      ...prev,
+      [filterKey]: tempSelected
+    }));
+    setShowModal(false);
+  };
+
+  const createCancelHandler = (originalSelected, setTempSelected, setShowModal) => () => {
+    setTempSelected(originalSelected);
+    setShowModal(false);
+  };
+
+  // Datos filtrados para cada modal
+  const filteredPatients = createFilteredItems(patientsResponse?.pacientes, patientsSearchTerm, 'nombres');
+  const filteredDoctors = createFilteredItems(doctorsResponse?.usuarios || doctorsResponse, doctorsSearchTerm, 'name');
+  const filteredCustomExams = createFilteredItems(
+    examOptions.map(opt => ({ id: opt.value, nombre: opt.label, ...opt.original })), 
+    customExamsSearchTerm, 
+    'nombre'
+  );
+  const filteredCustomServices = createFilteredItems(servicesResponse?.servicios || servicesResponse, customServicesSearchTerm, 'nombre');
+  const filteredCategories = createFilteredItems(categoriesResponse?.categorias || categoriesResponse, categoriesSearchTerm, 'nombre');
+
+  // Handlers para cada tipo de entidad
+  const handlePatientToggle = createToggleHandler(setTempSelectedPatients);
+  const handleDoctorToggle = createToggleHandler(setTempSelectedDoctors);
+  const handleCustomExamToggle = createToggleHandler(setTempSelectedCustomExams);
+  const handleCustomServiceToggle = createToggleHandler(setTempSelectedCustomServices);
+  const handleCategoryToggle = createToggleHandler(setTempSelectedCategories);
+
+  const handleSelectAllPatients = createSelectAllHandler(filteredPatients, tempSelectedPatients, setTempSelectedPatients);
+  const handleSelectAllDoctors = createSelectAllHandler(filteredDoctors, tempSelectedDoctors, setTempSelectedDoctors);
+  const handleSelectAllCustomExams = createSelectAllHandler(filteredCustomExams, tempSelectedCustomExams, setTempSelectedCustomExams);
+  const handleSelectAllCustomServices = createSelectAllHandler(filteredCustomServices, tempSelectedCustomServices, setTempSelectedCustomServices);
+  const handleSelectAllCategories = createSelectAllHandler(filteredCategories, tempSelectedCategories, setTempSelectedCategories);
+
+  const handleApplyPatients = createApplyHandler(tempSelectedPatients, 'patients', setCustomFilters, setShowPatientsModal);
+  const handleApplyDoctors = createApplyHandler(tempSelectedDoctors, 'doctors', setCustomFilters, setShowDoctorsModal);
+  const handleApplyCustomExams = createApplyHandler(tempSelectedCustomExams, 'exams', setCustomFilters, setShowCustomExamsModal);
+  const handleApplyCustomServices = createApplyHandler(tempSelectedCustomServices, 'services', setCustomFilters, setShowCustomServicesModal);
+  const handleApplyCategories = createApplyHandler(tempSelectedCategories, 'categories', setCustomFilters, setShowCategoriesModal);
+
+  const handleCancelPatients = createCancelHandler(customFilters.patients, setTempSelectedPatients, setShowPatientsModal);
+  const handleCancelDoctors = createCancelHandler(customFilters.doctors, setTempSelectedDoctors, setShowDoctorsModal);
+  const handleCancelCustomExams = createCancelHandler(customFilters.exams, setTempSelectedCustomExams, setShowCustomExamsModal);
+  const handleCancelCustomServices = createCancelHandler(customFilters.services, setTempSelectedCustomServices, setShowCustomServicesModal);
+  const handleCancelCategories = createCancelHandler(customFilters.categories, setTempSelectedCategories, setShowCategoriesModal);
+
+  // Filtrar exámenes basados en el término de búsqueda
+  const filteredExams = useMemo(() => {
+    if (!searchTerm.trim()) return examOptions;
+
+    return examOptions.filter(exam =>
+      exam.label.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [examOptions, searchTerm]);
+
+  // Manejar la selección/deselección de un examen
+  const handleExamToggle = (exam) => {
+    console.log('handleExamToggle called with exam:', exam);
+
+    setTempSelectedExams(prev => {
+      // Verificar si el examen ya está seleccionado
+      const isSelected = prev.some(e => e.value === exam.value);
+      console.log('Exam is currently selected:', isSelected);
+
+      if (isSelected) {
+        // Si ya está seleccionado, lo quitamos de la lista
+        const newSelection = prev.filter(e => e.value !== exam.value);
+        console.log('New selection after removal:', newSelection);
+        return newSelection;
+      } else {
+        // Si no está seleccionado, lo añadimos a la lista
+        const newSelection = [...prev, exam];
+        console.log('New selection after addition:', newSelection);
+        return newSelection;
+      }
+    });
+  };
+
+  // Manejar seleccionar/deseleccionar todos los exámenes
+  const handleSelectAll = () => {
+    console.log('handleSelectAll called');
+    console.log('Current tempSelectedExams:', tempSelectedExams);
+    console.log('Current filteredExams:', filteredExams);
+
+    // Verificar si todos los exámenes filtrados están seleccionados
+    const allSelected = filteredExams.every(exam =>
+      tempSelectedExams.some(selected => selected.value === exam.value)
+    );
+
+    console.log('All exams are currently selected:', allSelected);
+
+    if (allSelected) {
+      // Si todos están seleccionados, deseleccionar los que están en la lista filtrada
+      const newSelection = tempSelectedExams.filter(selected =>
+        !filteredExams.some(exam => exam.value === selected.value)
+      );
+      console.log('New selection after deselecting all:', newSelection);
+      setTempSelectedExams(newSelection);
+    } else {
+      // Si no todos están seleccionados, añadir los que faltan
+      const newSelection = [...tempSelectedExams];
+
+      filteredExams.forEach(exam => {
+        if (!newSelection.some(selected => selected.value === exam.value)) {
+          newSelection.push(exam);
+        }
+      });
+
+      console.log('New selection after selecting all:', newSelection);
+      setTempSelectedExams(newSelection);
+    }
+  };
+
+  // Obtener lista de exámenes para el filtro
+  const { data: examsResponse, isLoading: examsLoading } = useQuery(
+    ['exams-list'],
+    () => examsAPI.getAll({ all: true }).then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true // Cargar siempre para tener los datos disponibles
+    }
+  );
+
+  // Obtener lista de pacientes para los filtros personalizados
+  const { data: patientsResponse, isLoading: patientsLoading } = useQuery(
+    ['patients-list'],
+    () => patientsAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de doctores para los filtros personalizados
+  const { data: doctorsResponse, isLoading: doctorsLoading } = useQuery(
+    ['doctors-list'],
+    () => usersAPI.getDoctors().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de categorías para los filtros personalizados
+  const { data: categoriesResponse, isLoading: categoriesLoading } = useQuery(
+    ['categories-list'],
+    () => categoriesAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de servicios para los filtros personalizados
+  const { data: servicesResponse, isLoading: servicesLoading } = useQuery(
+    ['services-list'],
+    () => servicesAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Actualizar opciones de exámenes cuando se carguen los datos
+  useEffect(() => {
+    console.log('Respuesta de exámenes:', examsResponse);
+
+    if (examsResponse?.examenes) {
+      // Filtrar exámenes activos si existe la propiedad activo
+      const activeExams = Array.isArray(examsResponse.examenes)
+        ? examsResponse.examenes.filter(exam => exam.activo !== false)
+        : [];
+
+      console.log('Exámenes activos:', activeExams);
+
+      // Mapear los exámenes a opciones para el selector con información adicional
+      const options = activeExams.map(exam => {
+        // Crear una etiqueta para mostrar en la interfaz (solo el nombre)
+        const label = exam.nombre || `Examen ID: ${exam.id}`;
+
+        // Incluir toda la información relevante del examen
+        return {
+          value: exam.id,
+          label: label,
+          name: exam.nombre,
+          code: exam.codigo,
+          category: exam.categoria?.nombre || (exam.categoria_id ? `Categoría ${exam.categoria_id}` : 'Sin categoría'),
+          categoria: exam.categoria?.nombre,
+          categoria_id: exam.categoria_id,
+          // Incluir el objeto original para acceder a todas sus propiedades
+          original: exam
+        };
+      });
+
+      setExamOptions(options);
+      console.log('Opciones de exámenes cargadas:', options);
+    }
+  }, [examsResponse]);
+
+  // Funciones para manejar la selección múltiple en modales personalizados
+  const createFilteredItems = (items, searchTerm, nameProperty = 'nombre') => {
+    if (!items || !Array.isArray(items)) return [];
+    
+    if (!searchTerm.trim()) return items;
+    
+    return items.filter(item => {
+      const name = item[nameProperty] || item.name || '';
+      const dni = item.dni || '';
+      const codigo = item.codigo || '';
+      const searchValue = searchTerm.toLowerCase();
+      
+      return name.toLowerCase().includes(searchValue) ||
+             dni.toLowerCase().includes(searchValue) ||
+             codigo.toLowerCase().includes(searchValue);
+    });
+  };
+
+  const createToggleHandler = (setTempSelected) => (item) => {
+    setTempSelected(prev => {
+      const isSelected = prev.some(selected => selected.id === item.id);
+      if (isSelected) {
+        return prev.filter(selected => selected.id !== item.id);
+      } else {
+        return [...prev, item];
+      }
+    });
+  };
+
+  const createSelectAllHandler = (filteredItems, tempSelected, setTempSelected) => () => {
+    const allSelected = filteredItems.every(item =>
+      tempSelected.some(selected => selected.id === item.id)
+    );
+
+    if (allSelected) {
+      // Deseleccionar todos los filtrados
+      setTempSelected(prev =>
+        prev.filter(selected =>
+          !filteredItems.some(item => item.id === selected.id)
+        )
+      );
+    } else {
+      // Seleccionar todos los filtrados
+      setTempSelected(prev => {
+        const newSelection = [...prev];
+        filteredItems.forEach(item => {
+          if (!newSelection.some(selected => selected.id === item.id)) {
+            newSelection.push(item);
+          }
+        });
+        return newSelection;
+      });
+    }
+  };
+
+  const createApplyHandler = (tempSelected, filterKey, setCustomFilters, setShowModal) => () => {
+    setCustomFilters(prev => ({
+      ...prev,
+      [filterKey]: tempSelected
+    }));
+    setShowModal(false);
+  };
+
+  const createCancelHandler = (originalSelected, setTempSelected, setShowModal) => () => {
+    setTempSelected(originalSelected);
+    setShowModal(false);
+  };
+
+  // Datos filtrados para cada modal
+  const filteredPatients = createFilteredItems(patientsResponse?.pacientes, patientsSearchTerm, 'nombres');
+  const filteredDoctors = createFilteredItems(doctorsResponse?.usuarios || doctorsResponse, doctorsSearchTerm, 'name');
+  const filteredCustomExams = createFilteredItems(
+    examOptions.map(opt => ({ id: opt.value, nombre: opt.label, ...opt.original })), 
+    customExamsSearchTerm, 
+    'nombre'
+  );
+  const filteredCustomServices = createFilteredItems(servicesResponse?.servicios || servicesResponse, customServicesSearchTerm, 'nombre');
+  const filteredCategories = createFilteredItems(categoriesResponse?.categorias || categoriesResponse, categoriesSearchTerm, 'nombre');
+
+  // Handlers para cada tipo de entidad
+  const handlePatientToggle = createToggleHandler(setTempSelectedPatients);
+  const handleDoctorToggle = createToggleHandler(setTempSelectedDoctors);
+  const handleCustomExamToggle = createToggleHandler(setTempSelectedCustomExams);
+  const handleCustomServiceToggle = createToggleHandler(setTempSelectedCustomServices);
+  const handleCategoryToggle = createToggleHandler(setTempSelectedCategories);
+
+  const handleSelectAllPatients = createSelectAllHandler(filteredPatients, tempSelectedPatients, setTempSelectedPatients);
+  const handleSelectAllDoctors = createSelectAllHandler(filteredDoctors, tempSelectedDoctors, setTempSelectedDoctors);
+  const handleSelectAllCustomExams = createSelectAllHandler(filteredCustomExams, tempSelectedCustomExams, setTempSelectedCustomExams);
+  const handleSelectAllCustomServices = createSelectAllHandler(filteredCustomServices, tempSelectedCustomServices, setTempSelectedCustomServices);
+  const handleSelectAllCategories = createSelectAllHandler(filteredCategories, tempSelectedCategories, setTempSelectedCategories);
+
+  const handleApplyPatients = createApplyHandler(tempSelectedPatients, 'patients', setCustomFilters, setShowPatientsModal);
+  const handleApplyDoctors = createApplyHandler(tempSelectedDoctors, 'doctors', setCustomFilters, setShowDoctorsModal);
+  const handleApplyCustomExams = createApplyHandler(tempSelectedCustomExams, 'exams', setCustomFilters, setShowCustomExamsModal);
+  const handleApplyCustomServices = createApplyHandler(tempSelectedCustomServices, 'services', setCustomFilters, setShowCustomServicesModal);
+  const handleApplyCategories = createApplyHandler(tempSelectedCategories, 'categories', setCustomFilters, setShowCategoriesModal);
+
+  const handleCancelPatients = createCancelHandler(customFilters.patients, setTempSelectedPatients, setShowPatientsModal);
+  const handleCancelDoctors = createCancelHandler(customFilters.doctors, setTempSelectedDoctors, setShowDoctorsModal);
+  const handleCancelCustomExams = createCancelHandler(customFilters.exams, setTempSelectedCustomExams, setShowCustomExamsModal);
+  const handleCancelCustomServices = createCancelHandler(customFilters.services, setTempSelectedCustomServices, setShowCustomServicesModal);
+  const handleCancelCategories = createCancelHandler(customFilters.categories, setTempSelectedCategories, setShowCategoriesModal);
+
+  // Filtrar exámenes basados en el término de búsqueda
+  const filteredExams = useMemo(() => {
+    if (!searchTerm.trim()) return examOptions;
+
+    return examOptions.filter(exam =>
+      exam.label.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [examOptions, searchTerm]);
+
+  // Manejar la selección/deselección de un examen
+  const handleExamToggle = (exam) => {
+    console.log('handleExamToggle called with exam:', exam);
+
+    setTempSelectedExams(prev => {
+      // Verificar si el examen ya está seleccionado
+      const isSelected = prev.some(e => e.value === exam.value);
+      console.log('Exam is currently selected:', isSelected);
+
+      if (isSelected) {
+        // Si ya está seleccionado, lo quitamos de la lista
+        const newSelection = prev.filter(e => e.value !== exam.value);
+        console.log('New selection after removal:', newSelection);
+        return newSelection;
+      } else {
+        // Si no está seleccionado, lo añadimos a la lista
+        const newSelection = [...prev, exam];
+        console.log('New selection after addition:', newSelection);
+        return newSelection;
+      }
+    });
+  };
+
+  // Manejar seleccionar/deseleccionar todos los exámenes
+  const handleSelectAll = () => {
+    console.log('handleSelectAll called');
+    console.log('Current tempSelectedExams:', tempSelectedExams);
+    console.log('Current filteredExams:', filteredExams);
+
+    // Verificar si todos los exámenes filtrados están seleccionados
+    const allSelected = filteredExams.every(exam =>
+      tempSelectedExams.some(selected => selected.value === exam.value)
+    );
+
+    console.log('All exams are currently selected:', allSelected);
+
+    if (allSelected) {
+      // Si todos están seleccionados, deseleccionar los que están en la lista filtrada
+      const newSelection = tempSelectedExams.filter(selected =>
+        !filteredExams.some(exam => exam.value === selected.value)
+      );
+      console.log('New selection after deselecting all:', newSelection);
+      setTempSelectedExams(newSelection);
+    } else {
+      // Si no todos están seleccionados, añadir los que faltan
+      const newSelection = [...tempSelectedExams];
+
+      filteredExams.forEach(exam => {
+        if (!newSelection.some(selected => selected.value === exam.value)) {
+          newSelection.push(exam);
+        }
+      });
+
+      console.log('New selection after selecting all:', newSelection);
+      setTempSelectedExams(newSelection);
+    }
+  };
+
+  // Obtener lista de exámenes para el filtro
+  const { data: examsResponse, isLoading: examsLoading } = useQuery(
+    ['exams-list'],
+    () => examsAPI.getAll({ all: true }).then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true // Cargar siempre para tener los datos disponibles
+    }
+  );
+
+  // Obtener lista de pacientes para los filtros personalizados
+  const { data: patientsResponse, isLoading: patientsLoading } = useQuery(
+    ['patients-list'],
+    () => patientsAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de doctores para los filtros personalizados
+  const { data: doctorsResponse, isLoading: doctorsLoading } = useQuery(
+    ['doctors-list'],
+    () => usersAPI.getDoctors().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de categorías para los filtros personalizados
+  const { data: categoriesResponse, isLoading: categoriesLoading } = useQuery(
+    ['categories-list'],
+    () => categoriesAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Obtener lista de servicios para los filtros personalizados
+  const { data: servicesResponse, isLoading: servicesLoading } = useQuery(
+    ['services-list'],
+    () => servicesAPI.getAll().then(res => res.data),
+    {
+      staleTime: 300000, // 5 minutos
+      enabled: true
+    }
+  );
+
+  // Actualizar opciones de exámenes cuando se carguen los datos
+  useEffect(() => {
+    console.log('Respuesta de exámenes:', examsResponse);
+
+    if (examsResponse?.examenes) {
+      // Filtrar exámenes activos si existe la propiedad activo
+      const activeExams = Array.isArray(examsResponse.examenes)
+        ? examsResponse.examenes.filter(exam => exam.activo !== false)
+        : [];
+
+      console.log('Exámenes activos:', activeExams);
+
+      // Mapear los exámenes a opciones para el selector con información adicional
+      const options = activeExams.map(exam => {
+        // Crear una etiqueta para mostrar en la interfaz (solo el nombre)
+        const label = exam.nombre || `Examen ID: ${exam.id}`;
+
+        // Incluir toda la información relevante del examen
+        return {
+          value: exam.id,
+          label: label,
+          name: exam.nombre,
+          code: exam.codigo,
+          category: exam.categoria?.nombre || (exam.categoria_id ? `Categoría ${exam.categoria_id}` : 'Sin categoría'),
+          categoria: exam.categoria?.nombre,
+          categoria_id: exam.categoria_id,
+          // Incluir el objeto original para acceder a todas sus propiedades
+          original: exam
+        };
+      });
+
+      setExamOptions(options);
+      console.log('Opciones de exámenes cargadas:', options);
+    }
+  }, [examsResponse]);
+
+  // Funciones para manejar la selección múltiple en modales personalizados
+  const createFilteredItems = (items, searchTerm, nameProperty = 'nombre') => {
+    if (!items || !Array.isArray(items)) return [];
+    
+    if (!searchTerm.trim()) return items;
+    
+    return items.filter(item => {
+      const name = item[nameProperty] || item.name || '';
+      const dni = item.dni || '';
+      const codigo = item.codigo || '';
+      const searchValue = searchTerm.toLowerCase();
+      
+      return name.toLowerCase().includes(searchValue) ||
+             dni.toLowerCase().includes(searchValue) ||
+             codigo.toLowerCase().includes(searchValue);
+    });
+  };
+
+  const createToggleHandler = (setTempSelected) => (item) => {
+    setTempSelected(prev => {
+      const isSelected = prev.some(selected => selected.id === item.id);
+      if (isSelected) {
+        return prev.filter(selected => selected.id !== item.id);
+      } else {
+        return [...prev, item];
+      }
+    });
+  };
+
+  const createSelectAllHandler = (filteredItems, tempSelected, setTempSelected) => () => {
+    const allSelected = filteredItems.every(item =>
+      tempSelected.some(selected => selected.id === item.id)
+    );
+
+    if (allSelected) {
+      // Deseleccionar todos los filtrados
+      setTempSelected(prev =>
+        prev.filter(selected =>
+          !filteredItems.some(item => item.id === selected.id)
+        )
+      );
+    } else {
+      // Seleccionar todos los filtrados
+      setTempSelected(prev => {
+        const newSelection = [...prev];
+        filteredItems.forEach(item => {
+          if (!newSelection.some(selected => selected.id === item.id)) {
+            newSelection.push(item);
+          }
+        });
+        return newSelection;
+      });
+    }
+  };
+
+  const createApplyHandler = (tempSelected, filterKey, setCustomFilters, setShowModal) => () => {
+    setCustomFilters(prev => ({
+      ...prev,
+      [filterKey]: tempSelected
+    }));
+    setShowModal(false);
+  };
+
+  const createCancelHandler = (originalSelected, setTempSelected, setShowModal) => () => {
+    setTempSelected(originalSelected);
+    setShowModal(false);
+  };
+
+  // Datos filtrados para cada modal
+  const filteredPatients = createFilteredItems(patientsResponse?.pacientes, patientsSearchTerm, 'nombres');
+  const filteredDoctors = createFilteredItems(doctorsResponse?.usuarios || doctorsResponse, doctorsSearchTerm, 'name');
+  const filteredCustomExams = createFilteredItems(
+    examOptions.map(opt => ({ id: opt.value, nombre: opt.label, ...opt.original })), 
+    customExamsSearchTerm, 
+    'nombre'
+  );
+  const filteredCustomServices = createFilteredItems(servicesResponse?.servicios || servicesResponse, customServicesSearchTerm, 'nombre');
+  const filteredCategories = createFilteredItems(categoriesResponse?.categorias || categoriesResponse, categoriesSearchTerm, 'nombre');
+
+  // Handlers para cada tipo de entidad
+  const handlePatientToggle = createToggleHandler(setTempSelectedPatients);
+  const handleDoctorToggle = createToggleHandler(setTempSelectedDoctors);
+  const handleCustomExamToggle = createToggleHandler(setTempSelectedCustomExams);
+  const handleCustomServiceToggle = createToggleHandler(setTempSelectedCustomServices);
+  const handleCategoryToggle = createToggleHandler(setTempSelectedCategories);
+
+  const handleSelectAllPatients = createSelectAllHandler(filteredPatients, tempSelectedPatients, setTempSelectedPatients);
+  const handleSelectAllDoctors = createSelectAllHandler(filteredDoctors, tempSelectedDoctors, setTempSelectedDoctors);
+  const handleSelectAllCustomExams = createSelectAllHandler(filteredCustomExams, tempSelectedCustomExams, setTempSelectedCustomExams);
+  const handleSelectAllCustomServices = createSelectAllHandler(filteredCustomServices, tempSelectedCustomServices, setTempSelectedCustomServices);
+  const handleSelectAllCategories = createSelectAllHandler(filteredCategories, tempSelectedCategories, setTempSelectedCategories);
+
+  const handleApplyPatients = createApplyHandler(tempSelectedPatients, 'patients', setCustomFilters, setShowPatientsModal);
+  const handleApplyDoctors = createApplyHandler(tempSelectedDoctors, 'doctors', setCustomFilters, setShowDoctorsModal);
+  const handleApplyCustomExams = createApplyHandler(tempSelectedCustomExams, 'exams', setCustomFilters, setShowCustomExamsModal);
+  const handleApplyCustomServices = createApplyHandler(tempSelectedCustomServices, 'services', setCustomFilters, setShowCustomServicesModal);
+  const handleApplyCategories = createApplyHandler(tempSelectedCategories, 'categories', setCustomFilters, setShowCategoriesModal);
+
+  const handleCancelPatients = createCancelHandler(customFilters.patients, setTempSelectedPatients, setShowPatientsModal);
+  const handleCancelDoctors = createCancelHandler(customFilters.doctors, setTempSelectedDoctors, setShowDoctorsModal);
+  const handleCancelCustomExams = createCancelHandler(customFilters.exams, setTempSelectedCustomExams, setShowCustomExamsModal);
+  const handleCancelCustomServices = createCancelHandler(customFilters.services, setTempSelectedCustomServices, setShowCustomServicesModal);
+  const handleCancelCategories = createCancelHandler(customFilters.categories, setTempSelectedCategories, setShowCategoriesModal);
+
+  // Efectos para cargar datos iniciales y manejar cambios de estado
+  useEffect(() => {
+    if (isDoctor() && reportType === 'doctors') {
+      setReportType('general');
+      toast.info('Cambiando a reporte general');
+    }
+  }, [isDoctor, reportType]);
+
+  useEffect(() => {
+    if (reportType !== 'exams' && selectedExams.length > 0) {
+      setSelectedExams([]);
+      setTempSelectedExams([]);
+    }
+  }, [reportType]);
+
+  useEffect(() => {
+    if (reportType !== 'services' && selectedServices.length > 0) {
+      setSelectedServices([]);
+    }
+  }, [reportType]);
+
+  // Obtener datos de reportes
+  const { data: reportsData, isLoading: reportsLoading, error: reportsError, refetch } = useQuery(
+    ['advanced-reports', reportType, dateRange, statusFilter, selectedExams, selectedServices, customFilters],
+    async () => {
+      // Extraer fechas correctamente del dateRange
+      let startDate = null;
+      let endDate = null;
+
+      if (dateRange && dateRange.length >= 2) {
+        startDate = dateRange[0]?.startDate || dateRange[0];
+        endDate = dateRange[1]?.endDate || dateRange[1];
+      }
+
+      // Asegurar formato de fecha correcto (YYYY-MM-DD)
+      if (startDate && typeof startDate === 'object' && startDate.toISOString) {
+        startDate = startDate.toISOString().split('T')[0];
+      }
+      if (endDate && typeof endDate === 'object' && endDate.toISOString) {
+        endDate = endDate.toISOString().split('T')[0];
+      }
+
+      const params = {
+        type: reportType,
+        start_date: startDate,
+        end_date: endDate
+      };
+
+      // Parámetros para reportes personalizados
+      if (reportType === 'custom') {
+        params.type = 'custom';
+        
+        // Filtros de entidades específicas
+        if (customFilters.patients.length > 0) {
+          params.patient_ids = customFilters.patients.map(p => p.id);
+        }
+        if (customFilters.doctors.length > 0) {
+          params.doctor_ids = customFilters.doctors.map(d => d.id);
+        }
+        if (customFilters.exams.length > 0) {
+          params.exam_ids = customFilters.exams.map(e => e.id);
+        }
+        if (customFilters.services.length > 0) {
+          params.service_ids = customFilters.services.map(s => s.id);
+        }
+        if (customFilters.categories.length > 0) {
+          params.category_ids = customFilters.categories.map(c => c.id);
+        }
+        
+        // Filtro de estado personalizado
+        if (customFilters.statusFilter) {
+          params.status = customFilters.statusFilter;
+        }
+        
+        // Métricas a incluir
+        params.include_metrics = customFilters.includeMetrics;
+        
+        console.log('Enviando parámetros de reporte personalizado:', params);
+      }
+
+      if (reportType === 'results' && statusFilter) {
+        params.status = statusFilter;
+      }
+
+      // Añadir filtro de exámenes solo si el tipo de reporte es 'exams' y hay seleccionados
+      if (reportType === 'exams' && selectedExams.length > 0) {
+        // Enviamos los IDs como un array de números
+        params.exam_ids = selectedExams.map(exam => exam.value);
+        console.log('Enviando exámenes seleccionados:', params.exam_ids);
+
+        // Añadir un parámetro adicional para indicar que solo queremos estos exámenes
+        params.filter_by_exams = true;
+
+        // Añadir un parámetro para forzar el filtrado en el frontend
+        params.selected_exams_only = true;
+      }
+
+      // Añadir filtro de servicios solo si el tipo de reporte es 'services' y hay seleccionados
+      if (reportType === 'services' && selectedServices.length > 0) {
+        // Enviamos los IDs como un array de números
+        params.service_ids = selectedServices.map(service => service.id);
+        console.log('Enviando servicios seleccionados:', params.service_ids);
+
+        // Añadir un parámetro adicional para indicar que solo queremos estos servicios
+        params.filter_by_services = true;
+
+        // Añadir un parámetro para forzar el filtrado en el frontend
+        params.selected_services_only = true;
+      }
+
+      try {
+        console.log('Solicitando reportes con parámetros:', params);
+        console.log('🔍 Fechas procesadas:', { startDate, endDate, originalDateRange: dateRange });
+
+        const response = await reportsAPI.getReports(reportType, startDate, endDate, params);
+        console.log('Datos de reporte recibidos:', response.data);
+        return response.data;
+      } catch (error) {
+        console.error('Error al obtener reportes:', error);
+        toast.error('Error al cargar los datos de reportes');
+        throw error;
+      }
+    },
+    {
+      refetchOnWindowFocus: false,
+      staleTime: 0,
+      cacheTime: 0
+    }
+  );
+
+  // Generar PDF
+  const generatePDF = () => {
+    // Extraer fechas correctamente del dateRange
+    let startDate = null;
+    let endDate = null;
+
+    if (dateRange && dateRange.length >= 2) {
+      startDate = dateRange[0]?.startDate || dateRange[0];
+      endDate = dateRange[1]?.endDate || dateRange[1];
+    }
+
+    // Asegurar formato de fecha correcto (YYYY-MM-DD)
+    if (startDate && typeof startDate === 'object' && startDate.toISOString) {
+      startDate = startDate.toISOString().split('T')[0];
+    }
+    if (endDate && typeof endDate === 'object' && endDate.toISOString) {
+      endDate = endDate.toISOString().split('T')[0];
+    }
+
+    const params = {
+      type: reportType,
+      start_date: startDate,
+      end_date: endDate
+    };
+
+    // Parámetros para reportes personalizados en PDF
+    if (reportType === 'custom') {
+      params.type = 'custom';
+      
+      // Filtros de entidades específicas
+      if (customFilters.patients.length > 0) {
+        params.patient_ids = customFilters.patients.map(p => p.id);
+      }
+      if (customFilters.doctors.length > 0) {
+        params.doctor_ids = customFilters.doctors.map(d => d.id);
+      }
+      if (customFilters.exams.length > 0) {
+        params.exam_ids = customFilters.exams.map(e => e.id);
+      }
+      if (customFilters.services.length > 0) {
+        params.service_ids = customFilters.services.map(s => s.id);
+      }
+      if (customFilters.categories.length > 0) {
+        params.category_ids = customFilters.categories.map(c => c.id);
+      }
+      
+      // Filtro de estado personalizado
+      if (customFilters.statusFilter) {
+        params.status = customFilters.statusFilter;
+      }
+      
+      // Métricas a incluir
+      params.include_metrics = customFilters.includeMetrics;
+    }
+
+    if (reportType === 'results' && statusFilter) {
+      params.status = statusFilter;
+    }
+
+    // Añadir filtro de exámenes solo si el tipo de reporte es 'exams' y hay seleccionados
+    if (reportType === 'exams' && selectedExams.length > 0) {
+      // Enviamos los IDs como un array de números
+      params.exam_ids = selectedExams.map(exam => exam.value);
+      console.log('Enviando exámenes seleccionados para PDF:', params.exam_ids);
+
+      // Añadir un parámetro adicional para indicar que solo queremos estos exámenes
+      params.filter_by_exams = true;
+
+      // Añadir un parámetro para forzar el filtrado en el frontend
+      params.selected_exams_only = true;
+    }
+
+    // Añadir filtro de servicios solo si el tipo de reporte es 'services' y hay seleccionados
+    if (reportType === 'services' && selectedServices.length > 0) {
+      // Enviamos los IDs como un array de números
+      params.service_ids = selectedServices.map(service => service.id);
+      console.log('Enviando servicios seleccionados para PDF:', params.service_ids);
+
+      // Añadir un parámetro adicional para indicar que solo queremos estos servicios
+      params.filter_by_services = true;
+
+      // Añadir un parámetro para forzar el filtrado en el frontend
+      params.selected_services_only = true;
+    }
+
+    const reportTypeName = reportType === 'custom' ? 'personalizado' : reportType;
+
+    toast.promise(
+      reportsAPI.generatePDF(reportType, startDate, endDate, params),
+      {
+        loading: 'Generando PDF...',
+        success: (response) => {
+          // Crear un objeto URL para el blob
+          const url = window.URL.createObjectURL(new Blob([response.data]));
+          const link = document.createElement('a');
+          link.href = url;
+          link.setAttribute('download', `reporte_${reportTypeName}_${startDate}_${endDate}.pdf`);
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          return 'PDF generado correctamente';
+        },
+        error: 'Error al generar PDF'
+      }
+    );
+  };
+
+
+
+
+
+  // Renderizar el contenido según el tipo de reporte
+  const renderReportContent = () => {
+    // Depuración: Mostrar los datos recibidos en la consola
+    console.log('Renderizando reporte con datos:', reportsData);
+
+    if (reportsLoading) {
+      return (
+        <div className="flex justify-center items-center h-64">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary-500"></div>
+        </div>
+      );
+    }
+
+    if (reportsError) {
+      console.error('Error en el reporte:', reportsError);
+      return (
+        <div className="bg-red-100 dark:bg-red-900/30 p-4 rounded-lg text-red-700 dark:text-red-300">
+          Error al cargar los datos: {reportsError.message}
+        </div>
+      );
+    }
+
+    if (!reportsData?.data) {
+      return (
+        <div className="bg-yellow-100 dark:bg-yellow-900/30 p-4 rounded-lg text-yellow-700 dark:text-yellow-300">
+          No hay datos disponibles para el período seleccionado
+        </div>
+      );
+    }
+
+    // Renderizar según el tipo de reporte
+    switch (reportType) {
+      case 'general':
+        return renderGeneralReport(reportsData.data);
+      case 'exams':
+        return renderExamsReport(reportsData.data);
+      case 'services':
+        return renderServicesReport(reportsData.data);
+      case 'doctors':
+        return renderDoctorsReport(reportsData.data);
+      case 'patients':
+        return renderPatientsReport(reportsData.data);
+      case 'results':
+        return renderResultsReport(reportsData.data);
+      case 'categories':
+        return renderCategoriesReport(reportsData.data);
+      case 'custom':
+        return renderCustomReport(reportsData.data);
+      default:
+        return (
+          <div className="bg-yellow-100 dark:bg-yellow-900/30 p-4 rounded-lg text-yellow-700 dark:text-yellow-300">
+            Tipo de reporte no soportado
+          </div>
+        );
+    }
+  };
+
+  // Renderizar reporte general
+  const renderGeneralReport = (data) => {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Resumen */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Resumen
+            </h3>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
+              <div className="bg-primary-50 dark:bg-primary-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-primary-100 dark:bg-primary-800 rounded-md p-3">
+                      <CalendarIcon className="h-6 w-6 text-primary-600 dark:text-primary-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          Total Solicitudes
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.totalRequests || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-indigo-50 dark:bg-indigo-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-indigo-100 dark:bg-indigo-800 rounded-md p-3">
+                      <UserGroupIcon className="h-6 w-6 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          Total Pacientes
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.totalPatients || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-green-50 dark:bg-green-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-green-100 dark:bg-green-800 rounded-md p-3">
+                      <BeakerIcon className="h-6 w-6 text-green-600 dark:text-green-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          Total Exámenes
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.totalExams || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Distribución por Estado */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Distribución por Estado
+            </h3>
+            <div className="grid grid-cols-3 gap-6 mb-6">
+              <div className="bg-amber-100 dark:bg-amber-900/30 p-6 rounded-lg text-center min-h-[120px] flex flex-col justify-center items-center">
+                <div className="text-amber-600 dark:text-amber-400 text-3xl font-bold mb-2">{data.pendingCount || 0}</div>
+                <div className="text-gray-600 dark:text-gray-400 text-sm font-medium whitespace-nowrap">Pendientes</div>
+              </div>
+              <div className="bg-blue-100 dark:bg-blue-900/30 p-6 rounded-lg text-center min-h-[120px] flex flex-col justify-center items-center">
+                <div className="text-blue-600 dark:text-blue-400 text-3xl font-bold mb-2">{data.inProcessCount || 0}</div>
+                <div className="text-gray-600 dark:text-gray-400 text-sm font-medium whitespace-nowrap">En Proceso</div>
+              </div>
+              <div className="bg-green-100 dark:bg-green-900/30 p-6 rounded-lg text-center min-h-[120px] flex flex-col justify-center items-center">
+                <div className="text-green-600 dark:text-green-400 text-3xl font-bold mb-2">{data.completedCount || 0}</div>
+                <div className="text-gray-600 dark:text-gray-400 text-sm font-medium whitespace-nowrap">Completados</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Tabla de datos */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-2">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Datos Diarios
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
+                  <tr>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Fecha</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Solicitudes</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Pacientes</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Exámenes</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                  {data.dailyStats?.length > 0 ? (
+                    data.dailyStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{stat.date}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.count}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.patientCount}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.examCount}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="4" className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        No hay datos disponibles para el período seleccionado
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Renderizar exámenes seleccionados
+  const renderSelectedExams = () => {
+    if (!selectedExams || selectedExams.length === 0) {
+      return null;
+    }
+
+    // Obtener los datos filtrados para los exámenes seleccionados
+    let examStatsData = [];
+    if (reportsData?.data?.examStats) {
+      examStatsData = reportsData.data.examStats;
+    }
+
+    return (
+      <div className="mt-4 bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+        <div className="px-4 py-5 sm:p-6">
+          <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4 flex justify-between items-center">
+            <span>Exámenes seleccionados ({selectedExams.length})</span>
+            <button
+              onClick={() => setShowExamModal(true)}
+              className="text-sm text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300"
+            >
+              Editar selección
+            </button>
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+              <thead className="bg-gray-50 dark:bg-gray-700">
+                <tr>
+                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Examen
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Cantidad
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Porcentaje
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    Categoría
+                  </th>
+                  <th scope="col" className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    <span className="sr-only">Acciones</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                {selectedExams.map((exam, index) => {
+                  // Buscar datos reales del examen en los datos del reporte
+                  const examData = examStatsData.find(stat =>
+                    Number(stat.id) === Number(exam.value) || stat.name === exam.name
+                  );
+
+                  // Usar los datos de estadísticas si existen, o generar valores simulados
+                  const count = examData?.count || exam.count || '-';
+                  const percentage = examData?.percentage || '-';
+                  const category = examData?.category || exam.category || exam.categoria || 'BIOQUÍMICA';
+
+                  return (
+                    <tr key={exam.value} className={index % 2 === 0 ? "bg-white dark:bg-gray-800" : "bg-gray-50 dark:bg-gray-700"}>
+                      <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                        {exam.name || exam.nombre || exam.label}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                        {count}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                        {percentage !== '-' ? `${percentage}%` : '-'}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                        {category}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-sm text-right">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newSelectedExams = selectedExams.filter(
+                              (e) => e.value !== exam.value
+                            );
+                            setSelectedExams(newSelectedExams);
+
+                            // Si no quedan exámenes seleccionados, refrescar los datos
+                            if (newSelectedExams.length === 0) {
+                              toast.loading('Actualizando datos...', { id: 'refresh-toast' });
+                              setTimeout(() => {
+                                refetch().then(() => {
+                                  toast.success('Datos actualizados', { id: 'refresh-toast' });
+                                }).catch(() => {
+                                  toast.error('Error al actualizar datos', { id: 'refresh-toast' });
+                                });
+                              }, 300);
+                            }
+                          }}
+                          className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
+                        >
+                          <XMarkIcon className="h-5 w-5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Renderizar reporte por exámenes
+  const renderExamsReport = (data) => {
+    console.log('Renderizando reporte de exámenes con datos:', data);
+
+    // Filtrar los datos si hay exámenes seleccionados
+    let filteredData = { ...data };
+
+    if (selectedExams.length > 0 && data.examStats) {
+      console.log('Filtrando datos para exámenes seleccionados:', selectedExams.map(e => e.value));
+
+      // Verificar si el backend ya filtró los datos
+      if (data.selected_exams_only) {
+        console.log('El backend ya filtró los datos');
+        filteredData = data;
+      } else {
+        // Filtrar examStats para incluir solo los exámenes seleccionados
+        const selectedIds = selectedExams.map(exam => exam.value);
+        console.log('IDs de exámenes seleccionados:', selectedIds);
+        console.log('Exámenes disponibles en los datos:', data.examStats);
+
+        // Convertir IDs a números para comparación consistente
+        const numericSelectedIds = selectedIds.map(id => Number(id));
+
+        filteredData.examStats = data.examStats.filter(stat => {
+          // Convertir el ID del stat a número para comparación consistente
+          const statId = Number(stat.id);
+
+          // Intentar hacer coincidir por ID o por nombre
+          const matchById = numericSelectedIds.includes(statId);
+          const matchByName = selectedExams.some(exam => exam.name === stat.name);
+
+          console.log(`Examen ${stat.name} (ID: ${stat.id}): matchById=${matchById}, matchByName=${matchByName}`);
+
+          return matchById || matchByName;
+        });
+
+        console.log('Estadísticas filtradas manualmente:', filteredData.examStats);
+
+        // Recalcular el total de exámenes basado en los exámenes filtrados
+        filteredData.totalExams = filteredData.examStats.reduce((sum, stat) => sum + stat.count, 0);
+      }
+
+      // Si no hay datos después de filtrar, mostrar mensaje
+      if (!filteredData.examStats || filteredData.examStats.length === 0) {
+        console.log('No hay datos para los exámenes seleccionados después de filtrar');
+        return (
+          <div className="bg-yellow-100 dark:bg-yellow-900/30 p-4 rounded-lg text-yellow-700 dark:text-yellow-300">
+            No hay datos disponibles para los exámenes seleccionados en el período indicado.
+            <div className="mt-2">
+              <button
+                onClick={() => {
+                  setSelectedExams([]);
+                  toast.loading('Actualizando datos...', { id: 'refresh-toast' });
+                  setTimeout(() => {
+                    refetch().then(() => {
+                      toast.success('Datos actualizados', { id: 'refresh-toast' });
+                    }).catch(() => {
+                      toast.error('Error al actualizar datos', { id: 'refresh-toast' });
+                    });
+                  }, 300);
+                }}
+                className="text-sm text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300"
+              >
+                Limpiar selección y mostrar todos los exámenes
+              </button>
+            </div>
+          </div>
+        );
+      }
+    }
+
+    // Verificar si tenemos datos válidos
+    if (!filteredData || !filteredData.examStats || filteredData.examStats.length === 0) {
+      console.log('No hay datos para mostrar');
+      return (
+        <div className="bg-yellow-100 dark:bg-yellow-900/30 p-4 rounded-lg text-yellow-700 dark:text-yellow-300">
+          No hay datos disponibles para el período indicado.
+        </div>
+      );
+    }
+
+    // Calcular el total de exámenes
+    const totalExams = filteredData.totalExams ||
+                      (filteredData.examStats?.reduce((sum, stat) => sum + stat.count, 0) || 0);
+
+    // Procesar datos de distribución diaria si existen
+    const dailyStats = filteredData.dailyStats || filteredData.examTimeStats || [];
+
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Resumen (solo se muestra si no hay exámenes seleccionados) */}
+        {selectedExams.length === 0 && (
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                Resumen de Exámenes
+              </h3>
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
+                <div className="bg-primary-50 dark:bg-primary-900/30 overflow-hidden shadow rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-primary-100 dark:bg-primary-800 rounded-md p-3">
+                        <BeakerIcon className="h-6 w-6 text-primary-600 dark:text-primary-300" aria-hidden="true" />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                            Total Exámenes
+                          </dt>
+                          <dd>
+                            <div className="text-lg font-medium text-gray-900 dark:text-white">
+                              {totalExams}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="bg-indigo-50 dark:bg-indigo-900/30 overflow-hidden shadow rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-indigo-100 dark:bg-indigo-800 rounded-md p-3">
+                        <UserGroupIcon className="h-6 w-6 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                            Pacientes
+                          </dt>
+                          <dd>
+                            <div className="text-lg font-medium text-gray-900 dark:text-white">
+                              {filteredData.totalPatients || 0}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="bg-green-50 dark:bg-green-900/30 overflow-hidden shadow rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-green-100 dark:bg-green-800 rounded-md p-3">
+                        <ClipboardDocumentCheckIcon className="h-6 w-6 text-green-600 dark:text-green-300" aria-hidden="true" />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                            Período
+                          </dt>
+                          <dd>
+                            <div className="text-lg font-medium text-gray-900 dark:text-white">
+                              {dateRange && dateRange[0] && dateRange[1]
+                                ? `${dateRange[0].startDate} a ${dateRange[1].endDate}`
+                                : 'Período completo'}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* No mostramos la lista de exámenes seleccionados aquí para evitar duplicación */}
+
+        {/* Contenido del reporte de exámenes - solo se muestra si no hay exámenes seleccionados o si no se está mostrando la tabla de exámenes seleccionados */}
+        {filteredData.examStats && filteredData.examStats.length > 0 && selectedExams.length === 0 && (
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                Exámenes más solicitados
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Examen</th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Cantidad</th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Porcentaje</th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Categoría</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {filteredData.examStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-4 py-3 text-sm font-medium text-gray-900 dark:text-white">{stat.name}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-300">{stat.count}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-300">{stat.percentage}%</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-300">{stat.category || 'N/A'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Distribución diaria */}
+        {dailyStats.length > 0 && (
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                Distribución por Tiempo
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Fecha</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Pendientes</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">En Proceso</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Completados</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {dailyStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                          {stat.date || stat.fecha || `Día ${index + 1}`}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.pendiente || 0}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.en_proceso || 0}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.completado || stat.count || 0}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {(stat.pendiente || 0) + (stat.en_proceso || 0) + (stat.completado || stat.count || 0)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Tiempos promedio de procesamiento */}
+        {data.processingTimeStats && data.processingTimeStats.length > 0 && (
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                Tiempo Promedio de Procesamiento
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Examen</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Tiempo Promedio (horas)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {data.processingTimeStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                          {stat.examen?.nombre || stat.name || `Examen ID: ${stat.examen_id || index}`}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {parseFloat(stat.avg_hours).toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Renderizar reporte por servicios
+  const renderServicesReport = (data) => {
+    return (
+      <div className="space-y-6">
+        {/* Tabla principal de servicios */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Servicios más solicitados
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
+                  <tr>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Servicio</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Cantidad</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Porcentaje</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                  {data.serviceStats?.length > 0 ? (
+                    data.serviceStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{stat.name}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.count}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.percentage}%</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="3" className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        No hay datos disponibles para el período seleccionado
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {/* Exámenes por servicio */}
+        {data.serviceStats?.length > 0 && data.topExamsByService && (
+          <div className="space-y-4">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white">
+              Exámenes más solicitados por servicio
+            </h3>
+            {data.serviceStats.map((service, serviceIndex) => {
+              const serviceExams = data.topExamsByService[service.id];
+              if (!serviceExams || serviceExams.length === 0) return null;
+
+              return (
+                <div key={serviceIndex} className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <h4 className="text-md leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                      {service.name} ({service.count} solicitudes)
+                    </h4>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700">
+                          <tr>
+                            <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Examen</th>
+                            <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Categoría</th>
+                            <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Cantidad</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                          {serviceExams.map((exam, examIndex) => (
+                            <tr key={examIndex} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                              <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{exam.name}</td>
+                              <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{exam.category}</td>
+                              <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{exam.count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Renderizar reporte por doctores
+  const renderDoctorsReport = (data) => {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Contenido del reporte de doctores */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Solicitudes por Usuario
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
+                  <tr>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Usuario</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Especialidad/Rol</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Colegiatura</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Solicitudes</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Porcentaje</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                  {data.doctorStats?.length > 0 ? (
+                    data.doctorStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{stat.name}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.especialidad || 'No especificada'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.colegiatura || (stat.especialidad === 'Administrador de Laboratorio' ? 'No aplica' : 'No especificada')}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.count}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.percentage}%</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="5" className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        No hay datos disponibles para el período seleccionado
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Renderizar reporte por pacientes
+  const renderPatientsReport = (data) => {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Contenido del reporte de pacientes */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Pacientes con más Solicitudes
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
+                  <tr>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Paciente</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">DNI</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Solicitudes</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Porcentaje</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                  {data.patientStats?.length > 0 ? (
+                    data.patientStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{stat.name}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.dni || 'N/A'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.count}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{stat.percentage}%</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan="4" className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        No hay datos disponibles para el período seleccionado
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Renderizar reporte por resultados
+  const renderResultsReport = (data) => {
+    // Procesar los datos de processingTimeStats para adaptarlos al formato esperado
+    const processedTimeStats = data.processingTimeStats?.map(stat => ({
+      name: stat.examen?.nombre || `Examen ID: ${stat.examen_id}`,
+      avg_hours: stat.avg_hours
+    })) || [];
+
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Resumen */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              Resumen de Resultados
+            </h3>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-4">
+              <div className="bg-primary-50 dark:bg-primary-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-primary-100 dark:bg-primary-800 rounded-md p-3">
+                      <BeakerIcon className="h-6 w-6 text-primary-600 dark:text-primary-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          Total Resultados
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.totalExams || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-amber-50 dark:bg-amber-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-amber-100 dark:bg-amber-800 rounded-md p-3">
+                      <ClipboardDocumentCheckIcon className="h-6 w-6 text-amber-600 dark:text-amber-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          Pendientes
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.pendingCount || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-blue-50 dark:bg-blue-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-blue-100 dark:bg-blue-800 rounded-md p-3">
+                      <ClipboardDocumentCheckIcon className="h-6 w-6 text-blue-600 dark:text-blue-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          En Proceso
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.inProcessCount || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-green-50 dark:bg-green-900/30 overflow-hidden shadow rounded-lg">
+                <div className="px-4 py-5 sm:p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0 bg-green-100 dark:bg-green-800 rounded-md p-3">
+                      <ClipboardDocumentCheckIcon className="h-6 w-6 text-green-600 dark:text-green-300" aria-hidden="true" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                          Completados
+                        </dt>
+                        <dd>
+                          <div className="text-lg font-medium text-gray-900 dark:text-white">
+                            {data.completedCount || 0}
+                          </div>
+                        </dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Distribución diaria */}
+        {data.dailyStats && data.dailyStats.length > 0 && (
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                Distribución Diaria
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Fecha</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Pendientes</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">En Proceso</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Completados</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {data.dailyStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                          {stat.date}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.pendiente || 0}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.en_proceso || 0}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {stat.completado || 0}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {(stat.pendiente || 0) + (stat.en_proceso || 0) + (stat.completado || 0)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Tiempos promedio de procesamiento */}
+        {processedTimeStats.length > 0 && (
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+                Tiempo Promedio de Procesamiento
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Examen</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Tiempo Promedio (horas)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {processedTimeStats.map((stat, index) => (
+                      <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{stat.name}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                          {parseFloat(stat.avg_hours) > 0
+                            ? `${parseFloat(stat.avg_hours).toFixed(2)} (${Math.floor(parseFloat(stat.avg_hours))}h ${Math.round((parseFloat(stat.avg_hours) % 1) * 60)}m)`
+                            : `${Math.round(parseFloat(stat.avg_hours) * 60)} minutos`}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+    </div>
+  };
+
+  // Renderizar reporte personalizado
+  const renderCustomReport = (data) => {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Resumen personalizado */}
+        <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg lg:col-span-3">
+          <div className="px-4 py-5 sm:p-6">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">
+              📊 Reporte Personalizado
+            </h3>
+            
+            {/* Mostrar filtros aplicados */}
+            <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-4 mb-6">
+              <h4 className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2">Filtros Aplicados:</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-xs">
+                {customFilters.patients.length > 0 && (
+                  <div className="bg-white dark:bg-gray-700 rounded px-2 py-1">
+                    <strong>Pacientes:</strong> {customFilters.patients.length} seleccionados
+                  </div>
+                )}
+                {customFilters.doctors.length > 0 && (
+                  <div className="bg-white dark:bg-gray-700 rounded px-2 py-1">
+                    <strong>Doctores:</strong> {customFilters.doctors.length} seleccionados
+                  </div>
+                )}
+                {customFilters.exams.length > 0 && (
+                  <div className="bg-white dark:bg-gray-700 rounded px-2 py-1">
+                    <strong>Exámenes:</strong> {customFilters.exams.length} seleccionados
+                  </div>
+                )}
+                {customFilters.services.length > 0 && (
+                  <div className="bg-white dark:bg-gray-700 rounded px-2 py-1">
+                    <strong>Servicios:</strong> {customFilters.services.length} seleccionados
+                  </div>
+                )}
+                {customFilters.categories.length > 0 && (
+                  <div className="bg-white dark:bg-gray-700 rounded px-2 py-1">
+                    <strong>Categorías:</strong> {customFilters.categories.length} seleccionadas
+                  </div>
+                )}
+                {customFilters.statusFilter && (
+                  <div className="bg-white dark:bg-gray-700 rounded px-2 py-1">
+                    <strong>Estado:</strong> {customFilters.statusFilter}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Métricas personalizadas */}
+            {customFilters.includeMetrics.totalRequests && (
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-3 mb-6">
+                <div className="bg-primary-50 dark:bg-primary-900/30 overflow-hidden shadow rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-primary-100 dark:bg-primary-800 rounded-md p-3">
+                        <CalendarIcon className="h-6 w-6 text-primary-600 dark:text-primary-300" aria-hidden="true" />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                            Solicitudes Filtradas
+                          </dt>
+                          <dd>
+                            <div className="text-lg font-medium text-gray-900 dark:text-white">
+                              {data.totalRequests || 0}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="bg-indigo-50 dark:bg-indigo-900/30 overflow-hidden shadow rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-indigo-100 dark:bg-indigo-800 rounded-md p-3">
+                        <UserGroupIcon className="h-6 w-6 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                            Pacientes Únicos
+                          </dt>
+                          <dd>
+                            <div className="text-lg font-medium text-gray-900 dark:text-white">
+                              {data.totalPatients || 0}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="bg-green-50 dark:bg-green-900/30 overflow-hidden shadow rounded-lg">
+                  <div className="px-4 py-5 sm:p-6">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0 bg-green-100 dark:bg-green-800 rounded-md p-3">
+                        <BeakerIcon className="h-6 w-6 text-green-600 dark:text-green-300" aria-hidden="true" />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">
+                            Exámenes Realizados
+                          </dt>
+                          <dd>
+                            <div className="text-lg font-medium text-gray-900 dark:text-white">
+                              {data.totalExams || 0}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Distribución por estado si se incluye */}
+            {customFilters.includeMetrics.patientDistribution && data.statusDistribution && (
+              <div className="mb-6">
+                <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Distribución por Estado</h4>
+                <div className="grid grid-cols-3 gap-6">
+                  <div className="bg-amber-100 dark:bg-amber-900/30 p-6 rounded-lg text-center">
+                    <div className="text-amber-600 dark:text-amber-400 text-3xl font-bold mb-2">{data.pendingCount || 0}</div>
+                    <div className="text-gray-600 dark:text-gray-400 text-sm font-medium">Pendientes</div>
+                  </div>
+                  <div className="bg-blue-100 dark:bg-blue-900/30 p-6 rounded-lg text-center">
+                    <div className="text-blue-600 dark:text-blue-400 text-3xl font-bold mb-2">{data.inProcessCount || 0}</div>
+                    <div className="text-gray-600 dark:text-gray-400 text-sm font-medium">En Proceso</div>
+                  </div>
+                  <div className="bg-green-100 dark:bg-green-900/30 p-6 rounded-lg text-center">
+                    <div className="text-green-600 dark:text-green-400 text-3xl font-bold mb-2">{data.completedCount || 0}</div>
+                    <div className="text-gray-600 dark:text-gray-400 text-sm font-medium">Completados</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Datos detallados */}
+            {customFilters.includeMetrics.dailyStats && data.customResults && (
+              <div className="overflow-x-auto">
+                <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Resultados Detallados</h4>
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Fecha</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Paciente</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Doctor</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Examen/Servicio</th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {data.customResults?.length > 0 ? (
+                      data.customResults.map((result, index) => (
+                        <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                            {result.date || result.fecha_solicitud}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                            {result.patient_name || result.paciente_nombre || 'N/A'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                            {result.doctor_name || result.doctor_nombre || 'N/A'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                            {result.exam_name || result.service_name || result.examen_nombre || result.servicio_nombre || 'N/A'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                              result.estado === 'completado' ? 'bg-green-100 text-green-800' :
+                              result.estado === 'en_proceso' ? 'bg-blue-100 text-blue-800' :
+                              'bg-yellow-100 text-yellow-800'
+                            }`}>
+                              {result.estado || result.status || 'Pendiente'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="5" className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                          No hay datos disponibles con los filtros seleccionados
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg mb-6">
+        <div className="px-4 py-5 sm:px-6 flex flex-col md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+              Reportes Avanzados
+            </h2>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Visualiza estadísticas detalladas del laboratorio
+            </p>
+          </div>
+          <div className="mt-4 md:mt-0 flex flex-wrap gap-2">
+            <Link
+              to="/reportes"
+              className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 dark:focus:ring-offset-gray-800"
+            >
+              <ArrowPathIcon className="h-4 w-4 mr-1" />
+              Reportes Básicos
+            </Link>
+            <button
+              onClick={() => {
+                // Mostrar un mensaje de carga
+                toast.loading('Actualizando datos...', { id: 'refresh-toast' });
+                refetch().then(() => {
+                  toast.success('Datos actualizados', { id: 'refresh-toast' });
+                }).catch(() => {
+                  toast.error('Error al actualizar datos', { id: 'refresh-toast' });
+                });
+              }}
+              className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 dark:focus:ring-offset-gray-800"
+            >
+              <ArrowPathIcon className="h-4 w-4 mr-1" />
+              Actualizar
+            </button>
+            <button
+              onClick={generatePDF}
+              className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 dark:focus:ring-offset-gray-800"
+            >
+              <DocumentArrowDownIcon className="h-4 w-4 mr-1" />
+              PDF
+            </button>
+          </div>
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-700 px-4 py-5 sm:p-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Tipo de reporte */}
+            <div>
+              <label htmlFor="reportType" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Tipo de Reporte
+              </label>
+              <select
+                id="reportType"
+                name="reportType"
+                value={reportType}
+                onChange={(e) => setReportType(e.target.value)}
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+              >
+                <option value="general">General</option>
+                <option value="exams">Exámenes</option>
+                <option value="services">Servicios</option>
+                {!isDoctor() && <option value="doctors">Doctores</option>}
+                <option value="patients">Pacientes</option>
+                <option value="results">Resultados</option>
+                <option value="categories">Categorías</option>
+                <option value="custom">🎯 Personalizado</option>
+              </select>
+            </div>
+
+            {/* Filtro de estado (solo para resultados) */}
+            {reportType === 'results' && (
+              <div>
+                <label htmlFor="statusFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Estado
+                </label>
+                <select
+                  id="statusFilter"
+                  name="statusFilter"
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                >
+                  <option value="">Todos</option>
+                  <option value="pendiente">Pendiente</option>
+                  <option value="en_proceso">En Proceso</option>
+                  <option value="completado">Completado</option>
+                </select>
+              </div>
+            )}
+
+            {/* Filtro de exámenes (solo para tipo exams) */}
+            {reportType === 'exams' && (
+              <div>
+                <label htmlFor="examFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Exámenes
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowExamModal(true)}
+                  className="mt-1 flex justify-between items-center w-full rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white dark:hover:bg-gray-600"
+                >
+                  <span className="truncate">
+                    {selectedExams.length > 0
+                      ? `${selectedExams.length} examen(es) seleccionado(s)`
+                      : "Seleccionar exámenes..."}
+                  </span>
+                  <FunnelIcon className="ml-2 h-5 w-5 text-gray-400" aria-hidden="true" />
+                </button>
+
+                {/* No mostramos la lista de exámenes seleccionados aquí */}
+              </div>
+            )}
+
+            {/* Filtro de servicios (solo para tipo services) */}
+            {reportType === 'services' && (
+              <div>
+                <label htmlFor="serviceFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Servicios
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowServicesModal(true)}
+                  className="mt-1 flex justify-between items-center w-full rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white dark:hover:bg-gray-600"
+                >
+                  <span className="truncate">
+                    {selectedServices.length > 0
+                      ? `${selectedServices.length} servicio(s) seleccionado(s)`
+                      : "Seleccionar servicios..."}
+                  </span>
+                  <FunnelIcon className="ml-2 h-5 w-5 text-gray-400" aria-hidden="true" />
+                </button>
+              </div>
+            )}
+
+            {/* Configurador de reporte personalizado */}
+            {reportType === 'custom' && (
+              <div className="md:col-span-3">
+                <div className="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-700 rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center">
+                      <FunnelIcon className="h-5 w-5 text-blue-500 mr-2" />
+                      <h4 className="text-sm font-medium text-blue-900 dark:text-blue-100">
+                        Configuración de Reporte Personalizado
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomModal(true)}
+                      className="inline-flex items-center px-3 py-1.5 border border-blue-300 text-xs font-medium rounded-md text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:bg-blue-800 dark:text-blue-100 dark:border-blue-600 dark:hover:bg-blue-700"
+                    >
+                      <FunnelIcon className="h-3 w-3 mr-1" />
+                      Configurar Filtros
+                    </button>
+                  </div>
+                  
+                  <div className="text-xs text-blue-700 dark:text-blue-200">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      {customFilters.patients.length > 0 && (
+                        <div>
+                          <span className="font-medium">Pacientes:</span> {customFilters.patients.length} seleccionados
+                        </div>
+                      )}
+                      {customFilters.doctors.length > 0 && (
+                        <div>
+                          <span className="font-medium">Doctores:</span> {customFilters.doctors.length} seleccionados
+                        </div>
+                      )}
+                      {customFilters.exams.length > 0 && (
+                        <div>
+                          <span className="font-medium">Exámenes:</span> {customFilters.exams.length} seleccionados
+                        </div>
+                      )}
+                      {customFilters.services.length > 0 && (
+                        <div>
+                          <span className="font-medium">Servicios:</span> {customFilters.services.length} seleccionados
+                        </div>
+                      )}
+                      {customFilters.categories.length > 0 && (
+                        <div>
+                          <span className="font-medium">Categorías:</span> {customFilters.categories.length} seleccionadas
+                        </div>
+                      )}
+                      {customFilters.statusFilter && (
+                        <div>
+                          <span className="font-medium">Estado:</span> {customFilters.statusFilter}
+                        </div>
+                      )}
+                    </div>
+                    {!customFilters.patients.length && !customFilters.doctors.length && !customFilters.exams.length && 
+                     !customFilters.services.length && !customFilters.categories.length && !customFilters.statusFilter && (
+                      <p className="text-blue-600 dark:text-blue-300">
+                        Haga clic en "Configurar Filtros" para personalizar su reporte
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Rango de fechas */}
+            <div className={reportType === 'results' || reportType === 'exams' || reportType === 'services' || reportType === 'custom' ? "md:col-span-1" : "md:col-span-2"}>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Rango de Fechas
+              </label>
+              <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label htmlFor="startDate" className="sr-only">Fecha Inicio</label>
+                  <input
+                    type="date"
+                    id="startDate"
+                    name="startDate"
+                    value={dateRange && dateRange[0] ? dateRange[0].startDate : ''}
+                    onChange={(e) => {
+                      const newDateRange = [...dateRange];
+                      newDateRange[0] = {
+                        ...newDateRange[0],
+                        startDate: e.target.value,
+                        format: (format) => {
+                          return format === 'YYYY-MM-DD' ? e.target.value : new Date(e.target.value).toLocaleDateString();
+                        }
+                      };
+                      setDateRange(newDateRange);
+                    }}
+                    className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="endDate" className="sr-only">Fecha Fin</label>
+                  <input
+                    type="date"
+                    id="endDate"
+                    name="endDate"
+                    value={dateRange && dateRange[1] ? dateRange[1].endDate : ''}
+                    onChange={(e) => {
+                      const newDateRange = [...dateRange];
+                      newDateRange[1] = {
+                        ...newDateRange[1],
+                        endDate: e.target.value,
+                        format: (format) => {
+                          return format === 'YYYY-MM-DD' ? e.target.value : new Date(e.target.value).toLocaleDateString();
+                        }
+                      };
+                      setDateRange(newDateRange);
+                    }}
+                    className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sección de Gráficos - PRIMERO */}
+      {!reportsLoading && !reportsError && reportsData?.data && (
+        <div className="mt-6">
+          <div className="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
+            <div className="px-4 py-5 sm:p-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-6">
+                Gráficos Estadísticos
+              </h3>
+              <ReportCharts
+                reportType={reportType}
+                startDate={dateRange && dateRange[0] ? dateRange[0].startDate : null}
+                endDate={dateRange && dateRange[1] ? dateRange[1].endDate : null}
+                reportsData={reportsData}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mostrar exámenes seleccionados si hay alguno - DESPUÉS de los gráficos */}
+      {renderSelectedExams()}
+
+      {/* Contenido del reporte */}
+      <div className="mt-6">
+        {renderReportContent()}
+      </div>
+
+      {/* Modal de selección de exámenes */}
+      {showExamModal && (
+        <div className="fixed inset-0 z-[9999] overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            {/* Overlay de fondo */}
+            <div
+              className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+              aria-hidden="true"
+              onClick={() => setShowExamModal(false)}
+            ></div>
+
+            {/* Centrar el modal */}
+            <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            {/* Contenido del modal */}
+            <div className="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-3xl sm:w-full">
+              <div className="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                <div className="sm:flex sm:items-start">
+                  <div className="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
+                    <div className="flex justify-between items-center mb-4">
+                      <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white" id="modal-title">
+                        Exámenes más solicitados
+                      </h3>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
+                          placeholder="Buscar exámenes..."
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                        />
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                          <svg className="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden">
+                      <div className="max-h-96 overflow-y-auto">
+                        {examsLoading ? (
+                          <div className="flex justify-center items-center h-32">
+                            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-primary-500"></div>
+                          </div>
+                        ) : filteredExams.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                              <thead className="bg-gray-50 dark:bg-gray-700 sticky top-0 z-10">
+                                <tr>
+                                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider w-10">
+                                    <span className="sr-only">Seleccionar</span>
+                                  </th>
+                                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                                    Examen
+                                  </th>
+                                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                                    Cantidad
+                                  </th>
+                                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                                    Porcentaje
+                                  </th>
+                                  <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                                    Categoría
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                                {filteredExams.map((exam) => {
+                                  // Buscar datos reales del examen en los datos del reporte
+                                  let examData = null;
+                                  if (reportsData?.data?.examStats) {
+                                    examData = reportsData.data.examStats.find(stat =>
+                                      Number(stat.id) === Number(exam.value) || stat.name === exam.name
+                                    );
+                                  }
+
+                                  // Usar los datos reales si existen, o valores estáticos si no
+                                  const count = examData?.count || exam.count || '-';
+                                  const percentage = examData?.percentage || exam.percentage || '-';
+                                  const isSelected = tempSelectedExams.some(e => e.value === exam.value);
+
+                                  return (
+                                    <tr
+                                      key={exam.value}
+                                      className={`hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer ${isSelected ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        console.log('Toggling exam:', exam);
+                                        handleExamToggle(exam);
+                                      }}
+                                    >
+                                      <td className="px-3 py-2 whitespace-nowrap">
+                                        <input
+                                          id={`exam-${exam.value}`}
+                                          name={`exam-${exam.value}`}
+                                          type="checkbox"
+                                          className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                                          checked={isSelected}
+                                          onChange={(e) => {
+                                            // Evitar que el clic en el checkbox dispare el evento de la fila
+                                            e.stopPropagation();
+                                            console.log('Checkbox clicked for exam:', exam);
+                                            handleExamToggle(exam);
+                                          }}
+                                        />
+                                      </td>
+                                      <td className="px-3 py-2 text-sm font-medium text-gray-900 dark:text-white">
+                                        {exam.name || exam.nombre || exam.label}
+                                      </td>
+                                      <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                                        {count}
+                                      </td>
+                                      <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                                        {percentage !== '-' ? `${percentage}%` : '-'}
+                                      </td>
+                                      <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                                        {exam.category || exam.categoria || 'N/A'}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="px-4 py-6 text-center text-sm text-gray-500 dark:text-gray-400">
+                            No se encontraron exámenes
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 flex justify-between items-center">
+                      <div className="text-sm text-gray-500 dark:text-gray-400">
+                        {tempSelectedExams.length} examen(es) seleccionado(s)
+                      </div>
+                      <button
+                        type="button"
+                        className="text-sm text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300"
+                        onClick={handleSelectAll}
+                      >
+                        {tempSelectedExams.length === examOptions.length ? 'Deseleccionar todos' : 'Seleccionar todos'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 dark:bg-gray-700 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                <button
+                  type="button"
+                  className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-primary-600 text-base font-medium text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:ml-3 sm:w-auto sm:text-sm"
+                  onClick={() => {
+                    console.log('Applying exam selection:', tempSelectedExams);
+                    // Hacer una copia profunda para evitar problemas de referencia
+                    const examsCopy = tempSelectedExams.map(exam => ({...exam}));
+                    setSelectedExams(examsCopy);
+                    setShowExamModal(false);
+                    // Solo refrescar si la selección ha cambiado
+                    const selectionChanged =
+                      examsCopy.length !== selectedExams.length ||
+                      examsCopy.some(exam => !selectedExams.some(e => e.value === exam.value)) ||
+                      selectedExams.some(exam => !examsCopy.some(e => e.value === exam.value));
+
+                    if (selectionChanged) {
+                      // Mostrar un mensaje de carga
+                      toast.loading('Actualizando datos...', { id: 'refresh-toast' });
+
+                      // Refrescar los datos con un pequeño retraso
+                      setTimeout(() => {
+                        refetch().then(() => {
+                          toast.success('Datos actualizados', { id: 'refresh-toast' });
+                        }).catch(() => {
+                          toast.error('Error al actualizar datos', { id: 'refresh-toast' });
+                        });
+                      }, 300);
+                    }
+                  }}
+                >
+                  Aplicar
+                </button>
+                <button
+                  type="button"
+                  className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm dark:bg-gray-600 dark:text-white dark:border-gray-500 dark:hover:bg-gray-700"
+                  onClick={() => setShowExamModal(false)}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de configuración de filtros personalizados */}
+      {showCustomModal && (
+        <div className="fixed inset-0 z-[9999] overflow-y-auto" aria-labelledby="custom-modal-title" role="dialog" aria-modal="true">
+          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            {/* Overlay de fondo */}
+            <div
+              className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+              aria-hidden="true"
+              onClick={() => setShowCustomModal(false)}
+            ></div>
+
+            {/* Centrar el modal */}
+            <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+
+            {/* Contenido del modal */}
+            <div className="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-6xl sm:w-full">
+              <div className="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                <div className="sm:flex sm:items-start">
+                  <div className="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
+                    <div className="flex justify-between items-center mb-6">
+                      <h3 className="text-lg leading-6 font-medium text-gray-900 dark:text-white" id="custom-modal-title">
+                        🎯 Configurar Reporte Personalizado
+                      </h3>
+                      <button
+                        type="button"
+                        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                        onClick={() => setShowCustomModal(false)}
+                      >
+                        <XMarkIcon className="h-6 w-6" />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      {/* Selección de Entidades */}
+                      <div className="space-y-6">
+                        <h4 className="text-md font-medium text-gray-900 dark:text-white border-b pb-2">
+                          Seleccionar Entidades
+                        </h4>
+                        
+                        {/* Filtros de Pacientes */}
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            <UserGroupIcon className="inline h-4 w-4 mr-1" />
+                            Pacientes Específicos
+                          </label>
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              placeholder="Buscar pacientes por nombre o DNI..."
+                              className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                            />
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {customFilters.patients.length} paciente(s) seleccionados
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Filtros de Doctores */}
+                        {!isDoctor() && (
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                              <UserIcon className="inline h-4 w-4 mr-1" />
+                              Doctores Específicos
+                            </label>
+                            <div className="space-y-2">
+                              <input
+                                type="text"
+                                placeholder="Buscar doctores por nombre..."
+                                className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                              />
+                              <div className="text-xs text-gray-500 dark:text-gray-400">
+                                {customFilters.doctors.length} doctor(es) seleccionados
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Filtros de Exámenes */}
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            <BeakerIcon className="inline h-4 w-4 mr-1" />
+                            Exámenes Específicos
+                          </label>
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              placeholder="Buscar exámenes por nombre..."
+                              className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                            />
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {customFilters.exams.length} examen(es) seleccionados
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Filtros de Servicios */}
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            <ClipboardDocumentCheckIcon className="inline h-4 w-4 mr-1" />
+                            Servicios Específicos
+                          </label>
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              placeholder="Buscar servicios por nombre..."
+                              className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                            />
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {customFilters.services.length} servicio(s) seleccionados
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Filtros de Categorías */}
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            <TagIcon className="inline h-4 w-4 mr-1" />
+                            Categorías Específicas
+                          </label>
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              placeholder="Buscar categorías por nombre..."
+                              className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                            />
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {customFilters.categories.length} categoría(s) seleccionadas
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Configuración de Métricas */}
+                      <div className="space-y-6">
+                        <h4 className="text-md font-medium text-gray-900 dark:text-white border-b pb-2">
+                          Configurar Métricas a Incluir
+                        </h4>
+
+                        {/* Estado de Solicitudes */}
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Estado de Solicitudes
+                          </label>
+                          <select
+                            value={customFilters.statusFilter}
+                            onChange={(e) => setCustomFilters(prev => ({
+                              ...prev,
+                              statusFilter: e.target.value
+                            }))}
+                            className="block w-full border-gray-300 rounded-md shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                          >
+                            <option value="">Todos los estados</option>
+                            <option value="pendiente">Solo Pendientes</option>
+                            <option value="en_proceso">Solo En Proceso</option>
+                            <option value="completado">Solo Completados</option>
+                          </select>
+                        </div>
+
+                        {/* Métricas a incluir */}
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                            Métricas a Incluir en el Reporte
+                          </label>
+                          <div className="space-y-3">
+                            <label className="flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={customFilters.includeMetrics.totalRequests}
+                                onChange={(e) => setCustomFilters(prev => ({
+                                  ...prev,
+                                  includeMetrics: {
+                                    ...prev.includeMetrics,
+                                    totalRequests: e.target.checked
+                                  }
+                                }))}
+                                className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                              />
+                              <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                                Total de solicitudes y estadísticas básicas
+                              </span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={customFilters.includeMetrics.avgProcessingTime}
+                                onChange={(e) => setCustomFilters(prev => ({
+                                  ...prev,
+                                  includeMetrics: {
+                                    ...prev.includeMetrics,
+                                    avgProcessingTime: e.target.checked
+                                  }
+                                }))}
+                                className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                              />
+                              <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                                Tiempo promedio de procesamiento
+                              </span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={customFilters.includeMetrics.popularExams}
+                                onChange={(e) => setCustomFilters(prev => ({
+                                  ...prev,
+                                  includeMetrics: {
+                                    ...prev.includeMetrics,
+                                    popularExams: e.target.checked
+                                  }
+                                }))}
+                                className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                              />
+                              <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                                Exámenes más populares
+                              </span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={customFilters.includeMetrics.patientDistribution}
+                                onChange={(e) => setCustomFilters(prev => ({
+                                  ...prev,
+                                  includeMetrics: {
+                                    ...prev.includeMetrics,
+                                    patientDistribution: e.target.checked
+                                  }
+                                }))}
+                                className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                              />
+                              <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                                Distribución por estado de solicitudes
+                              </span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={customFilters.includeMetrics.dailyStats}
+                                onChange={(e) => setCustomFilters(prev => ({
+                                  ...prev,
+                                  includeMetrics: {
+                                    ...prev.includeMetrics,
+                                    dailyStats: e.target.checked
+                                  }
+                                }))}
+                                className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                              />
+                              <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                                Datos detallados por día
+                              </span>
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* Información adicional */}
+                        <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-4">
+                          <h5 className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2">
+                            💡 Sugerencia
+                          </h5>
+                          <p className="text-xs text-blue-700 dark:text-blue-200">
+                            Seleccione las entidades específicas que desea analizar y las métricas que desea incluir. 
+                            Si no selecciona ninguna entidad específica, se incluirán todas en el análisis.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 dark:bg-gray-700 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                <button
+                  type="button"
+                  className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-primary-600 text-base font-medium text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:ml-3 sm:w-auto sm:text-sm"
+                  onClick={() => {
+                    console.log('Aplicando filtros personalizados:', customFilters);
+                    setShowCustomModal(false);
+                    // Refrescar los datos con los filtros personalizados
+                    toast.loading('Generando reporte personalizado...', { id: 'custom-refresh-toast' });
+                    setTimeout(() => {
+                      refetch().then(() => {
+                        toast.success('Reporte personalizado generado', { id: 'custom-refresh-toast' });
+                      }).catch(() => {
+                        toast.error('Error al generar reporte personalizado', { id: 'custom-refresh-toast' });
+                      });
+                    }, 300);
+                  }}
+                >
+                  🎯 Generar Reporte
+                </button>
+                <button
+                  type="button"
+                  className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm dark:bg-gray-600 dark:text-white dark:border-gray-500 dark:hover:bg-gray-700"
+                  onClick={() => setShowCustomModal(false)}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm dark:bg-gray-600 dark:text-white dark:border-gray-500 dark:hover:bg-gray-700"
+                  onClick={() => {
+                    setCustomFilters({
+                      patients: [],
+                      doctors: [],
+                      exams: [],
+                      services: [],
+                      categories: [],
+                      dateRange: {
+                        start: '',
+                        end: ''
+                      },
+                      statusFilter: '',
+                      includeMetrics: {
+                        totalRequests: true,
+                        avgProcessingTime: true,
+                        popularExams: true,
+                        patientDistribution: true,
+                        dailyStats: true
+                      }
+                    });
+                    toast.success('Filtros reiniciados');
+                  }}
+                >
+                  🗑️ Limpiar Todo
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}

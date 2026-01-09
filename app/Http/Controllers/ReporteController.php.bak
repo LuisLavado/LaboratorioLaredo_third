@@ -1,0 +1,2131 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Http\Controllers\Controller;
+use App\Models\Solicitud;
+use App\Models\Paciente;
+use App\Models\Examen;
+use App\Models\Servicio;
+use App\Models\DetalleSolicitud;
+use App\Services\ChartDataService;
+use App\Exports\ModernReportExport;
+use App\Exports\ReportExcelExport;
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Maatwebsite\Excel\Facades\Excel;
+
+class ReporteController extends Controller
+{
+    private $chartDataService;
+
+    public function __construct(ChartDataService $chartDataService)
+    {
+        $this->chartDataService = $chartDataService;
+    }
+    /**
+     * Obtener reportes según el tipo y rango de fechas
+     * Versión optimizada para mejor rendimiento
+     */
+    public function getReports(Request $request): JsonResponse
+    {
+        $type = $request->input('type', 'general');
+        $startDate = $request->input('start_date');
+        $endDate = $request->input('end_date');
+        $page = $request->input('page', 1);
+        $perPage = $request->input('per_page', 50);
+        $includeDetails = $request->input('include_details', false);
+        
+        // Clave para caché
+        $cacheKey = "report_{$type}_{$startDate}_{$endDate}_p{$page}";
+        
+        // Verificar si los datos están en caché (excepto para Excel)
+        $isForExcel = $request->input('excel', false);
+        if (!$isForExcel && !$includeDetails && cache()->has($cacheKey)) {
+            \Log::info('🚀 Usando datos en caché para reporte', ['type' => $type, 'cache_key' => $cacheKey]);
+            return response()->json(cache()->get($cacheKey));
+        }
+        
+        \Log::info('getReports called with:', [
+            'type' => $type,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'page' => $page,
+            'per_page' => $perPage,
+            'all_params' => $request->all()
+        ]);
+
+        // Validar fechas
+        if (!$startDate || !$endDate) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Las fechas de inicio y fin son requeridas'
+            ], 400);
+        }
+
+        // Convertir fechas a objetos Carbon
+        $startDate = Carbon::parse($startDate)->startOfDay();
+        $endDate = Carbon::parse($endDate)->endOfDay();
+
+        \Log::info('📊 FECHAS PARSEADAS:', [
+            'startDate_original' => $request->input('start_date'),
+            'endDate_original' => $request->input('end_date'),
+            'startDate_parsed' => $startDate->format('Y-m-d H:i:s'),
+            'endDate_parsed' => $endDate->format('Y-m-d H:i:s'),
+            'type' => $type
+        ]);
+
+        // Validar que la fecha de inicio sea menor o igual a la fecha de fin
+        if ($startDate->gt($endDate)) {
+            return response()->json([
+                'status' => false,
+                'message' => 'La fecha de inicio debe ser menor o igual a la fecha de fin'
+            ], 400);
+        }
+
+        // Obtener datos según el tipo de reporte
+        $data = [];
+
+        switch ($type) {
+            case 'general':
+                $data = $this->getGeneralReport($startDate, $endDate);
+                break;
+            case 'exams':
+                // Verificar si hay exámenes seleccionados para filtrar
+                $examIds = $request->input('exam_ids');
+
+                // Si no se recibió exam_ids, intentar con exam_ids_csv (respaldo)
+                if (empty($examIds) && $request->has('exam_ids_csv')) {
+                    $examIds = explode(',', $request->input('exam_ids_csv'));
+                    \Log::info('Usando exam_ids_csv como respaldo en getReports: ' . $request->input('exam_ids_csv'));
+                }
+
+                $filterByExams = $request->input('filter_by_exams', false);
+
+                $data = $this->getExamsReport($startDate, $endDate, $examIds, $filterByExams);
+
+                // Añadir flag para indicar que los datos ya están filtrados
+                if ($filterByExams && $examIds) {
+                    $data['selected_exams_only'] = true;
+                }
+                break;
+            case 'services':
+                // Verificar si hay servicios seleccionados para filtrar
+                $serviceIds = $request->input('service_ids');
+                $filterByServices = $request->input('filter_by_services', false);
+
+                $data = $this->getServicesReport($startDate, $endDate, $serviceIds, $filterByServices);
+
+                // Añadir flag para indicar que los datos ya están filtrados
+                if ($filterByServices && $serviceIds) {
+                    $data['selected_services_only'] = true;
+                }
+                break;
+            case 'doctors':
+                $data = $this->getDoctorsReport($startDate, $endDate);
+                break;
+            case 'patients':
+                $includeDetailedResults = $request->has('excel') || $request->input('detailed_results', false);
+                $data = $this->getPatientsReport(
+                    $startDate, 
+                    $endDate, 
+                    $includeDetailedResults,
+                    $includeDetailedResults ? null : $page,
+                    $includeDetailedResults ? null : $perPage
+                );
+                break;
+            case 'results':
+                // Para Excel de resultados, incluir detalles como en el reporte de pacientes
+                $includeDetailedResults = $request->has('excel') || $request->input('detailed_results', false);
+                \Log::info('🔧 Results case - includeDetailedResults logic:', [
+                    'request->has(excel)' => $request->has('excel'),
+                    'request->input(detailed_results, false)' => $request->input('detailed_results', false),
+                    'includeDetailedResults' => $includeDetailedResults,
+                    'status' => $request->input('status')
+                ]);
+                $data = $this->getResultsReport($startDate, $endDate, $request->input('status'), $includeDetailedResults);
+                break;
+            case 'categories':
+                $data = $this->getCategoriesReport($startDate, $endDate);
+                break;
+            case 'doctor_personal':
+                // Reporte específico para un doctor
+                $doctorId = $request->input('doctor_id');
+                if (!$doctorId) {
+                    $doctorId = $request->user()->id;
+                }
+                $data = $this->getDoctorPersonalReport($startDate, $endDate, $doctorId);
+                break;
+            default:
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Tipo de reporte no válido'
+                ], 400);
+        }
+
+        \Log::info('📊 DATOS FINALES ENVIADOS AL FRONTEND:', [
+            'type' => $type,
+            'data_keys' => array_keys($data),
+            'data_counts' => [
+                'totalRequests' => $data['totalRequests'] ?? 'N/A',
+                'totalPatients' => $data['totalPatients'] ?? 'N/A',
+                'totalExams' => $data['totalExams'] ?? 'N/A',
+                'pendingCount' => $data['pendingCount'] ?? 'N/A',
+                'inProcessCount' => $data['inProcessCount'] ?? 'N/A',
+                'completedCount' => $data['completedCount'] ?? 'N/A',
+                'examStats_count' => isset($data['examStats']) ? count($data['examStats']) : 'N/A',
+                'serviceStats_count' => isset($data['serviceStats']) ? count($data['serviceStats']) : 'N/A',
+                'dailyStats_count' => isset($data['dailyStats']) ? count($data['dailyStats']) : 'N/A'
+            ],
+            'examStats_sample' => isset($data['examStats']) ? $data['examStats']->take(3) : 'N/A',
+            'serviceStats_sample' => isset($data['serviceStats']) ? $data['serviceStats']->take(3) : 'N/A'
+        ]);
+
+        return response()->json([
+            'status' => true,
+            'data' => $data
+        ]);
+    }
+
+    /**
+     * Generar reporte general
+     */
+    private function getGeneralReport($startDate, $endDate)
+    {
+        \Log::info('getGeneralReport called', [
+            'startDate' => $startDate->format('Y-m-d'),
+            'endDate' => $endDate->format('Y-m-d')
+        ]);
+
+        // Verificar si hay solicitudes en el rango de fechas
+        $totalSolicitudesEnRango = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])->count();
+        \Log::info('Total solicitudes en rango:', ['count' => $totalSolicitudesEnRango]);
+
+        // Si no hay solicitudes en el rango, verificar todas las solicitudes
+        if ($totalSolicitudesEnRango === 0) {
+            $todasLasSolicitudes = Solicitud::count();
+            $primeraFecha = Solicitud::orderBy('fecha')->first()?->fecha;
+            $ultimaFecha = Solicitud::orderBy('fecha', 'desc')->first()?->fecha;
+
+            \Log::info('No hay solicitudes en el rango especificado', [
+                'total_solicitudes_sistema' => $todasLasSolicitudes,
+                'primera_fecha' => $primeraFecha,
+                'ultima_fecha' => $ultimaFecha
+            ]);
+        }
+
+        // Contar solicitudes por estado (el estado está en la tabla detallesolicitud, no en solicitudes)
+        // CORREGIDO: Usar campo 'fecha' en lugar de 'created_at'
+        $statusCounts = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+            })
+            ->select('estado', DB::raw('count(*) as count'))
+            ->groupBy('estado')
+            ->get()
+            ->pluck('count', 'estado')
+            ->toArray();
+
+        \Log::info('Status counts:', $statusCounts);
+
+        // Si no hay datos, inicializar con valores por defecto
+        if (empty($statusCounts)) {
+            $statusCounts = [
+                'pendiente' => 0,
+                'en_proceso' => 0,
+                'completado' => 0
+            ];
+        }
+
+        // Contar solicitudes por día
+        try {
+            // Método 1: Usar una subconsulta para evitar el error de GROUP BY
+            $dailyStats = DB::table(function($query) use ($startDate, $endDate) {
+                $query->from('solicitudes')
+                    ->select('fecha as date')
+                    ->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                    ->groupBy('fecha');
+            })->select('date', DB::raw('count(*) as count'))
+              ->groupBy('date')
+              ->orderBy('date')
+              ->get();
+        } catch (\Exception $e) {
+            // Método 2: Alternativa si el método 1 falla
+            try {
+                $dailyStats = DB::select(
+                    "SELECT fecha as date, COUNT(*) as count
+                     FROM solicitudes
+                     WHERE fecha BETWEEN ? AND ?
+                     GROUP BY fecha
+                     ORDER BY date ASC",
+                    [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]
+                );
+            } catch (\Exception $e2) {
+                // Método 3: Última alternativa
+                $dailyStats = collect();
+                $currentDate = $startDate->copy();
+
+                while ($currentDate->lte($endDate)) {
+                    $dateStr = $currentDate->format('Y-m-d');
+
+                    $count = Solicitud::where('fecha', $dateStr)->count();
+
+                    $dailyStats->push((object)[
+                        'date' => $currentDate->format('Y-m-d'),
+                        'count' => $count
+                    ]);
+
+                    $currentDate->addDay();
+                }
+            }
+        }
+
+        // Agregar conteo de pacientes y exámenes por día
+        foreach ($dailyStats as $stat) {
+            $date = $stat->date;
+
+            // Contar pacientes únicos por día
+            $stat->patientCount = Solicitud::where('fecha', $date)
+                ->distinct('paciente_id')
+                ->count('paciente_id');
+
+            // CORREGIDO: examCount debe ser igual al count de solicitudes porque cada solicitud es "un examen"
+            $stat->examCount = $stat->count;
+        }
+
+        // Totales
+        $totalRequests = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])->count();
+        $totalPatients = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->distinct('paciente_id')
+            ->count('paciente_id');
+        // CORREGIDO: totalExams debe ser igual a totalRequests porque cada solicitud es "un examen"
+        // aunque internamente tenga múltiples sub-exámenes
+        $totalExams = $totalRequests;
+
+        // Agregar estadísticas de exámenes más solicitados para gráficos
+        $topExams = DB::table('detallesolicitud')
+            ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+            ->join('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+            ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->select(
+                'examenes.id',
+                'examenes.nombre as name',
+                DB::raw('count(*) as count')
+            )
+            ->groupBy('examenes.id', 'examenes.nombre')
+            ->orderByDesc('count')
+            ->limit(10)
+            ->get();
+
+        // Agregar estadísticas de servicios más utilizados para gráficos
+        $topServices = DB::table('solicitudes')
+            ->join('servicios', 'solicitudes.servicio_id', '=', 'servicios.id')
+            ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->select(
+                'servicios.id',
+                'servicios.nombre as name',
+                DB::raw('count(*) as count')
+            )
+            ->groupBy('servicios.id', 'servicios.nombre')
+            ->orderByDesc('count')
+            ->limit(10)
+            ->get();
+
+        return [
+            'pendingCount' => $statusCounts['pendiente'] ?? 0,
+            'inProcessCount' => $statusCounts['en_proceso'] ?? 0,
+            'completedCount' => $statusCounts['completado'] ?? 0,
+            'dailyStats' => $dailyStats,
+            'totalRequests' => $totalRequests,
+            'totalPatients' => $totalPatients,
+            'totalExams' => $totalExams,
+            'examStats' => $topExams,
+            'serviceStats' => $topServices
+        ];
+    }
+
+    /**
+     * Generar reporte por exámenes
+     *
+     * @param Carbon $startDate Fecha de inicio
+     * @param Carbon $endDate Fecha de fin
+     * @param array|null $examIds IDs de exámenes para filtrar (opcional)
+     * @param bool $filterByExams Indica si se debe filtrar por exámenes
+     * @return array
+     */
+    private function getExamsReport($startDate, $endDate, $examIds = null, $filterByExams = false)
+    {
+        // Contar exámenes por tipo
+        try {
+            $query = DB::table('detallesolicitud')
+                ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+                ->join('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+                ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+
+            // Filtrar por exámenes específicos si se proporciona
+            if ($filterByExams && $examIds) {
+                // Asegurarse de que $examIds sea un array
+                if (!is_array($examIds)) {
+                    // Si es un string, intentar convertirlo a array
+                    if (strpos($examIds, ',') !== false) {
+                        $examIds = explode(',', $examIds);
+                    } else {
+                        $examIds = [$examIds];
+                    }
+                }
+
+                // Limpiar y convertir los IDs a enteros
+                $cleanIds = [];
+                foreach ($examIds as $id) {
+                    $cleanIds[] = (int)$id;
+                }
+
+                // Registrar los IDs para depuración
+                \Log::info('Filtrando por exámenes IDs: ' . json_encode($cleanIds));
+
+                $query->whereIn('examenes.id', $cleanIds);
+            }
+
+            $examStats = $query->select(
+                    'examenes.id',
+                    'examenes.nombre as name',
+                    DB::raw('count(*) as count')
+                )
+                ->groupBy('examenes.id', 'examenes.nombre')
+                ->orderByDesc('count')
+                ->get();
+        } catch (\Exception $e) {
+            // Alternativa usando consulta SQL directa
+            if ($filterByExams && $examIds) {
+                // Asegurarse de que $examIds sea un array
+                if (!is_array($examIds)) {
+                    // Si es un string, intentar convertirlo a array
+                    if (strpos($examIds, ',') !== false) {
+                        $examIds = explode(',', $examIds);
+                    } else {
+                        $examIds = [$examIds];
+                    }
+                }
+
+                // Limpiar y convertir los IDs a enteros
+                $cleanIds = [];
+                foreach ($examIds as $id) {
+                    $cleanIds[] = (int)$id;
+                }
+
+                // Registrar los IDs para depuración
+                \Log::info('Filtrando por exámenes IDs (SQL): ' . json_encode($cleanIds));
+
+                // Convertir array a string para la consulta SQL
+                $examIdsStr = implode(',', $cleanIds);
+
+                // Verificar que tenemos IDs válidos
+                if (!empty($examIdsStr)) {
+                    $examStats = DB::select(
+                        "SELECT e.id, e.nombre as name, COUNT(*) as count, c.nombre as category
+                         FROM detallesolicitud d
+                         JOIN solicitudes s ON d.solicitud_id = s.id
+                         JOIN examenes e ON d.examen_id = e.id
+                         LEFT JOIN categorias c ON e.categoria_id = c.id
+                         WHERE s.fecha BETWEEN ? AND ?
+                         AND e.id IN ($examIdsStr)
+                         GROUP BY e.id, e.nombre, c.nombre
+                         ORDER BY count DESC",
+                        [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]
+                    );
+                } else {
+                    // Si no hay IDs válidos, devolver un conjunto vacío
+                    $examStats = [];
+                }
+            } else {
+                $examStats = DB::select(
+                    "SELECT e.id, e.nombre as name, COUNT(*) as count, c.nombre as category
+                     FROM detallesolicitud d
+                     JOIN solicitudes s ON d.solicitud_id = s.id
+                     JOIN examenes e ON d.examen_id = e.id
+                     LEFT JOIN categorias c ON e.categoria_id = c.id
+                     WHERE s.fecha BETWEEN ? AND ?
+                     GROUP BY e.id, e.nombre, c.nombre
+                     ORDER BY count DESC",
+                    [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]
+                );
+            }
+        }
+
+        // Calcular porcentajes
+        $totalExams = $examStats->sum('count');
+        foreach ($examStats as $stat) {
+            $stat->percentage = $totalExams > 0 ? round(($stat->count / $totalExams) * 100, 2) : 0;
+
+            // Asegurarse de que la categoría esté presente
+            if (empty($stat->category)) {
+                // Buscar la categoría del examen en la base de datos
+                $examen = \App\Models\Examen::find($stat->id);
+                if ($examen && $examen->categoria) {
+                    $stat->category = $examen->categoria->nombre;
+                } else {
+                    $stat->category = 'BIOQUÍMICA';
+                }
+            }
+        }
+
+        // Contar solicitudes por estado (para gráficos)
+        $statusCounts = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+            })
+            ->select('estado', DB::raw('count(*) as count'))
+            ->groupBy('estado')
+            ->get()
+            ->pluck('count', 'estado')
+            ->toArray();
+
+        // Totales
+        $totalRequests = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])->count();
+        $totalPatients = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->distinct('paciente_id')
+            ->count('paciente_id');
+
+        return [
+            'examStats' => $examStats,
+            'pendingCount' => $statusCounts['pendiente'] ?? 0,
+            'inProcessCount' => $statusCounts['en_proceso'] ?? 0,
+            'completedCount' => $statusCounts['completado'] ?? 0,
+            'totalRequests' => $totalRequests,
+            'totalPatients' => $totalPatients,
+            'totalExams' => $totalExams
+        ];
+    }
+
+    /**
+     * Generar reporte por servicios
+     */
+    private function getServicesReport($startDate, $endDate, $serviceIds = null, $filterByServices = false)
+    {
+        \Log::info('getServicesReport called', [
+            'startDate' => $startDate->format('Y-m-d H:i:s'),
+            'endDate' => $endDate->format('Y-m-d H:i:s'),
+            'serviceIds' => $serviceIds,
+            'filterByServices' => $filterByServices
+        ]);
+
+        // Debug: Verificar datos en las tablas
+        $totalSolicitudes = DB::table('solicitudes')->whereBetween('created_at', [$startDate, $endDate])->count();
+        $totalServicios = DB::table('servicios')->count();
+
+        \Log::info('Services Report Debug counts', [
+            'totalSolicitudes' => $totalSolicitudes,
+            'totalServicios' => $totalServicios
+        ]);
+
+        // Contar solicitudes por servicio
+        try {
+            $query = DB::table('solicitudes')
+                ->join('servicios', 'solicitudes.servicio_id', '=', 'servicios.id')
+                ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+
+            // Filtrar por servicios específicos si se proporcionan
+            if ($filterByServices && $serviceIds && is_array($serviceIds) && count($serviceIds) > 0) {
+                $query->whereIn('servicios.id', $serviceIds);
+            }
+
+            $serviceStats = $query->select(
+                    'servicios.id',
+                    'servicios.nombre as name',
+                    DB::raw('count(*) as count')
+                )
+                ->groupBy('servicios.id', 'servicios.nombre')
+                ->orderByDesc('count')
+                ->get();
+        } catch (\Exception $e) {
+            // Alternativa usando consulta SQL directa
+            $whereClause = "sol.fecha BETWEEN ? AND ?";
+            $params = [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')];
+
+            if ($filterByServices && $serviceIds && is_array($serviceIds) && count($serviceIds) > 0) {
+                $placeholders = str_repeat('?,', count($serviceIds) - 1) . '?';
+                $whereClause .= " AND s.id IN ($placeholders)";
+                $params = array_merge($params, $serviceIds);
+            }
+
+            $serviceStats = DB::select(
+                "SELECT s.id, s.nombre as name, COUNT(*) as count
+                 FROM solicitudes sol
+                 JOIN servicios s ON sol.servicio_id = s.id
+                 WHERE $whereClause
+                 GROUP BY s.id, s.nombre
+                 ORDER BY count DESC",
+                $params
+            );
+        }
+
+        // Si hay servicios específicos seleccionados, obtener también los exámenes por servicio
+        if ($filterByServices && $serviceIds && is_array($serviceIds) && count($serviceIds) > 0) {
+            foreach ($serviceStats as $service) {
+                // Obtener exámenes más solicitados para este servicio
+                $examsByService = DB::table('solicitudes')
+                    ->join('detallesolicitud', 'solicitudes.id', '=', 'detallesolicitud.solicitud_id')
+                    ->join('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+                    ->where('solicitudes.servicio_id', $service->id)
+                    ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                    ->select(
+                        'examenes.nombre as name',
+                        DB::raw('count(*) as count')
+                    )
+                    ->groupBy('examenes.id', 'examenes.nombre')
+                    ->orderByDesc('count')
+                    ->limit(10) // Top 10 exámenes por servicio
+                    ->get();
+
+                // Calcular porcentajes dentro del servicio
+                $totalExamsInService = $examsByService->sum('count');
+                foreach ($examsByService as $exam) {
+                    $exam->service_percentage = $totalExamsInService > 0
+                        ? round(($exam->count / $totalExamsInService) * 100, 2)
+                        : 0;
+                }
+
+                $service->exams = $examsByService;
+                $service->unique_exams = count($examsByService);
+            }
+        }
+
+        // Calcular porcentajes
+        $totalServices = $serviceStats->sum('count');
+        foreach ($serviceStats as $stat) {
+            $stat->percentage = $totalServices > 0 ? round(($stat->count / $totalServices) * 100, 2) : 0;
+        }
+
+        // Obtener exámenes más solicitados por servicio
+        $topExamsByService = [];
+        foreach ($serviceStats as $service) {
+            try {
+                $exams = DB::table('detallesolicitud')
+                    ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+                    ->join('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+                    ->join('categorias', 'examenes.categoria_id', '=', 'categorias.id')
+                    ->where('solicitudes.servicio_id', $service->id)
+                    ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                    ->select(
+                        'examenes.id',
+                        'examenes.nombre as name',
+                        'categorias.nombre as category',
+                        DB::raw('count(*) as count')
+                    )
+                    ->groupBy('examenes.id', 'examenes.nombre', 'categorias.nombre')
+                    ->orderByDesc('count')
+                    ->limit(5)
+                    ->get();
+
+                $topExamsByService[$service->id] = $exams;
+            } catch (\Exception $e) {
+                // Manejar error
+                $topExamsByService[$service->id] = [];
+            }
+        }
+
+        // Contar solicitudes por estado (para gráficos)
+        $statusCounts = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+            })
+            ->select('estado', DB::raw('count(*) as count'))
+            ->groupBy('estado')
+            ->get()
+            ->pluck('count', 'estado')
+            ->toArray();
+
+        // Totales
+        $totalRequests = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])->count();
+        $totalPatients = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->distinct('paciente_id')
+            ->count('paciente_id');
+        // CORREGIDO: totalExams debe ser igual a totalRequests porque cada solicitud es "un examen"
+        $totalExams = $totalRequests;
+
+        $result = [
+            'serviceStats' => $serviceStats,
+            'topExamsByService' => $topExamsByService,
+            'pendingCount' => $statusCounts['pendiente'] ?? 0,
+            'inProcessCount' => $statusCounts['en_proceso'] ?? 0,
+            'completedCount' => $statusCounts['completado'] ?? 0,
+            'totalRequests' => $totalRequests,
+            'totalPatients' => $totalPatients,
+            'totalExams' => $totalExams,
+            'startDate' => $startDate->format('d/m/Y'),
+            'endDate' => $endDate->format('d/m/Y')
+        ];
+
+        \Log::info('getServicesReport result', [
+            'serviceStats_count' => count($serviceStats),
+            'totalRequests' => $totalRequests,
+            'totalPatients' => $totalPatients,
+            'totalExams' => $totalExams,
+            'serviceStats' => $serviceStats->toArray()
+        ]);
+
+        return $result;
+    }
+
+    /**
+     * Generar reporte en PDF
+     */
+    public function generatePDF(Request $request)
+    {
+        $type = $request->input('type', 'general');
+        $startDate = $request->input('start_date');
+        $endDate = $request->input('end_date');
+
+        \Log::info('🔍 generatePDF called', [
+            'type' => $type,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'all_params' => $request->all()
+        ]);
+
+        // Validar fechas
+        if (!$startDate || !$endDate) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Las fechas de inicio y fin son requeridas'
+            ], 400);
+        }
+
+        // Convertir fechas a objetos Carbon
+        $startDate = Carbon::parse($startDate)->startOfDay();
+        $endDate = Carbon::parse($endDate)->endOfDay();
+
+        \Log::info('📅 Fechas procesadas', [
+            'startDate' => $startDate->format('Y-m-d H:i:s'),
+            'endDate' => $endDate->format('Y-m-d H:i:s')
+        ]);
+
+        // Obtener datos según el tipo de reporte
+        $data = [];
+
+        switch ($type) {
+            case 'general':
+                $data = $this->getGeneralReport($startDate, $endDate);
+                \Log::info('📊 Datos obtenidos para reporte general', [
+                    'totalRequests' => $data['totalRequests'] ?? 'N/A',
+                    'totalPatients' => $data['totalPatients'] ?? 'N/A',
+                    'totalExams' => $data['totalExams'] ?? 'N/A',
+                    'pendingCount' => $data['pendingCount'] ?? 'N/A',
+                    'inProcessCount' => $data['inProcessCount'] ?? 'N/A',
+                    'completedCount' => $data['completedCount'] ?? 'N/A',
+                    'dailyStats_count' => is_array($data['dailyStats']) ? count($data['dailyStats']) : 'N/A',
+                    'examStats_count' => is_array($data['examStats']) ? count($data['examStats']) : 'N/A',
+                    'serviceStats_count' => is_array($data['serviceStats']) ? count($data['serviceStats']) : 'N/A'
+                ]);
+                $title = 'Reporte General';
+                break;
+            case 'exams':
+                // Verificar si hay exámenes seleccionados para filtrar
+                $examIds = $request->input('exam_ids');
+
+                // Si no se recibió exam_ids, intentar con exam_ids_csv (respaldo)
+                if (empty($examIds) && $request->has('exam_ids_csv')) {
+                    $examIds = explode(',', $request->input('exam_ids_csv'));
+                    \Log::info('Usando exam_ids_csv como respaldo: ' . $request->input('exam_ids_csv'));
+                }
+
+                $filterByExams = $request->input('filter_by_exams', false);
+
+                $data = $this->getExamsReport($startDate, $endDate, $examIds, $filterByExams);
+
+                // Añadir flag para indicar que los datos ya están filtrados
+                if ($filterByExams && $examIds) {
+                    $data['selected_exams_only'] = true;
+                }
+
+                $title = 'Reporte por Exámenes';
+                break;
+            case 'services':
+                // Verificar si hay servicios seleccionados para filtrar
+                $serviceIds = $request->input('service_ids');
+                $filterByServices = $request->input('filter_by_services', false);
+
+                $data = $this->getServicesReport($startDate, $endDate, $serviceIds, $filterByServices);
+
+                // Añadir flag para indicar que los datos ya están filtrados
+                if ($filterByServices && $serviceIds) {
+                    $data['selected_services_only'] = true;
+                }
+
+                $title = 'Reporte por Servicios';
+                break;
+            case 'doctors':
+                $data = $this->getDoctorsReport($startDate, $endDate);
+                $title = 'Reporte por Doctores';
+                break;
+            case 'patients':
+                $data = $this->getPatientsReport($startDate, $endDate);
+                $title = 'Reporte por Pacientes';
+                break;
+            case 'results':
+                // Para Excel, incluir detalles de resultados
+                $includeDetailedResults = true; // Para Excel siempre incluir detalles
+                $data = $this->getResultsReport($startDate, $endDate, $request->input('status'), $includeDetailedResults);
+                $title = 'Reporte por Resultados';
+                break;
+            case 'categories':
+                $data = $this->getCategoriesReport($startDate, $endDate);
+                $title = 'Reporte por Categorías';
+                break;
+            case 'doctor_personal':
+                // Reporte específico para un doctor
+                $doctorId = $request->input('doctor_id');
+                if (!$doctorId) {
+                    $doctorId = $request->user()->id;
+                }
+                $data = $this->getDoctorPersonalReport($startDate, $endDate, $doctorId);
+                $title = 'Mis Reportes';
+                break;
+            default:
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Tipo de reporte no válido'
+                ], 400);
+        }
+
+        // Verificar si se debe mostrar el resumen
+        $showSummary = true;
+
+        // Si es un reporte de exámenes con exámenes seleccionados, no mostrar el resumen
+        if ($type === 'exams' && $request->has('selected_exams_only') &&
+            ($request->input('selected_exams_only') === 'true' || $request->input('selected_exams_only') === true)) {
+            $showSummary = false;
+        }
+
+        // Preparar datos y plantilla según el tipo de reporte
+        $viewData = [
+            'title' => $title,
+            'startDate' => $startDate->format('d/m/Y'),
+            'endDate' => $endDate->format('d/m/Y'),
+            'reportType' => ucfirst($type),
+            'generatedBy' => $request->user()->nombre . ' ' . $request->user()->apellido,
+        ];
+
+        // Determinar plantilla y datos específicos según el tipo
+        $templateName = 'reports.general-report-pdf'; // Por defecto
+
+        switch ($type) {
+            case 'categories':
+                $templateName = 'reports.categories-clean-pdf';
+                \Log::info('PDF Categories - Data received:', $data);
+                $viewData = array_merge($viewData, [
+                    'categoryStats' => $data['categoryStats'] ?? [],
+                    'topExamsByCategory' => $data['topExamsByCategory'] ?? [],
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalPatients' => $data['totalPatients'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                ]);
+                \Log::info('PDF Categories - ViewData prepared:', $viewData);
+                break;
+            case 'doctors':
+                $templateName = 'reports.doctors-clean-pdf';
+                $viewData = array_merge($viewData, [
+                    'doctorStats' => $data['doctorStats'] ?? [],
+                    'resultStats' => $data['resultStats'] ?? [],
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalPatients' => $data['totalPatients'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                ]);
+                break;
+            case 'patients':
+                $templateName = 'reports.patients-report-pdf';
+                $viewData = array_merge($viewData, [
+                    'patientStats' => $data['patientStats'] ?? [],
+                    'genderStats' => $data['genderStats'] ?? [],
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalDoctors' => $data['totalDoctors'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                ]);
+                break;
+            case 'exams':
+                $templateName = 'reports.exams-clean-pdf';
+                $viewData = array_merge($viewData, [
+                    'examStats' => $data['examStats'] ?? [],
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalPatients' => $data['totalPatients'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                ]);
+                break;
+            case 'services':
+                $templateName = 'reports.services-clean-pdf';
+                $viewData = array_merge($viewData, [
+                    'serviceStats' => $data['serviceStats'] ?? [],
+                    'topExamsByService' => $data['topExamsByService'] ?? [],
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalPatients' => $data['totalPatients'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                ]);
+                break;
+            case 'results':
+                $templateName = 'reports.results-report-pdf';
+                $viewData = array_merge($viewData, [
+                    'statusCounts' => $data['statusCounts'] ?? [],
+                    'dailyStats' => $data['dailyStats'] ?? [],
+                    'processingTimeStats' => $data['processingTimeStats'] ?? [],
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalPatients' => $data['totalPatients'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                    'pendingCount' => $data['pendingCount'] ?? 0,
+                    'inProcessCount' => $data['inProcessCount'] ?? 0,
+                    'completedCount' => $data['completedCount'] ?? 0,
+                ]);
+                break;
+            default:
+                // Para reportes generales y otros - pasar variables directamente como espera la plantilla
+                $viewData = array_merge($viewData, [
+                    // Variables principales que espera la plantilla
+                    'totalRequests' => $data['totalRequests'] ?? 0,
+                    'totalPatients' => $data['totalPatients'] ?? 0,
+                    'totalExams' => $data['totalExams'] ?? 0,
+                    'pendingCount' => $data['pendingCount'] ?? 0,
+                    'inProcessCount' => $data['inProcessCount'] ?? 0,
+                    'completedCount' => $data['completedCount'] ?? 0,
+                    'dailyStats' => $data['dailyStats'] ?? [],
+
+                    // Variables adicionales para compatibilidad
+                    'solicitudes' => $data['solicitudes'] ?? [],
+                    'stats' => [
+                        'total_solicitudes' => $data['totalRequests'] ?? 0,
+                        'total_pacientes' => $data['totalPatients'] ?? 0,
+                        'total_examenes' => $data['totalExams'] ?? 0,
+                        'pendientes' => $data['pendingCount'] ?? 0,
+                        'en_proceso' => $data['inProcessCount'] ?? 0,
+                        'completadas' => $data['completedCount'] ?? 0,
+                    ],
+                    'topExamenes' => $data['examStats'] ?? [],
+                    'topServicios' => $data['serviceStats'] ?? [],
+                    'topDoctores' => $data['top_doctores'] ?? []
+                ]);
+
+                \Log::info('📄 ViewData para PDF general', [
+                    'template' => $templateName,
+                    'totalRequests' => $viewData['totalRequests'],
+                    'totalPatients' => $viewData['totalPatients'],
+                    'totalExams' => $viewData['totalExams'],
+                    'pendingCount' => $viewData['pendingCount'],
+                    'inProcessCount' => $viewData['inProcessCount'],
+                    'completedCount' => $viewData['completedCount'],
+                    'dailyStats_count' => count($viewData['dailyStats'])
+                ]);
+                break;
+        }
+
+        // Generar PDF con la plantilla específica
+        \Log::info('PDF Generation - Template:', ['template' => $templateName, 'type' => $type]);
+        $pdf = Pdf::loadView($templateName, $viewData);
+        $pdf->setPaper('A4', 'portrait');
+        $pdf->setOptions([
+            'isHtml5ParserEnabled' => true,
+            'isRemoteEnabled' => true,
+            'defaultFont' => 'sans-serif'
+        ]);
+
+        return $pdf->download("reporte_laboratorio_{$type}_{$startDate->format('Y-m-d')}_{$endDate->format('Y-m-d')}.pdf");
+    }
+
+    /**
+     * Obtener estadísticas para el dashboard
+     */
+    public function dashboardStats(Request $request): JsonResponse
+    {
+        // Obtener estadísticas generales
+        $totalPacientes = Paciente::count();
+        $totalExamenes = Examen::where('activo', true)->count();
+        $totalServicios = Servicio::count();
+        $totalSolicitudes = Solicitud::count();
+
+        // Obtener conteo de solicitudes por estado
+        $solicitudesPorEstado = DetalleSolicitud::select('estado', DB::raw('count(*) as total'))
+            ->groupBy('estado')
+            ->get()
+            ->pluck('total', 'estado')
+            ->toArray();
+
+        // Obtener solicitudes recientes
+        $solicitudesRecientes = Solicitud::with(['paciente', 'servicio', 'user'])
+            ->orderBy('created_at', 'desc')
+            ->take(5)
+            ->get();
+
+        // Obtener exámenes más solicitados
+        try {
+            $examenesMasSolicitados = DB::table('detallesolicitud')
+                ->join('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+                ->select('examenes.id', 'examenes.nombre', DB::raw('count(*) as total'))
+                ->groupBy('examenes.id', 'examenes.nombre')
+                ->orderBy('total', 'desc')
+                ->take(5)
+                ->get();
+        } catch (\Exception $e) {
+            // Alternativa usando consulta SQL directa
+            $examenesMasSolicitados = DB::select(
+                "SELECT e.id, e.nombre, COUNT(*) as total
+                 FROM detallesolicitud d
+                 JOIN examenes e ON d.examen_id = e.id
+                 GROUP BY e.id, e.nombre
+                 ORDER BY total DESC
+                 LIMIT 5"
+            );
+        }
+
+        // Obtener servicios más solicitados
+        try {
+            $serviciosMasSolicitados = DB::table('solicitudes')
+                ->join('servicios', 'solicitudes.servicio_id', '=', 'servicios.id')
+                ->select('servicios.id', 'servicios.nombre', DB::raw('count(*) as total'))
+                ->groupBy('servicios.id', 'servicios.nombre')
+                ->orderBy('total', 'desc')
+                ->take(5)
+                ->get();
+        } catch (\Exception $e) {
+            // Alternativa usando consulta SQL directa
+            $serviciosMasSolicitados = DB::select(
+                "SELECT s.id, s.nombre, COUNT(*) as total
+                 FROM solicitudes sol
+                 JOIN servicios s ON sol.servicio_id = s.id
+                 GROUP BY s.id, s.nombre
+                 ORDER BY total DESC
+                 LIMIT 5"
+            );
+        }
+
+        // Obtener solicitudes por día (últimos 7 días)
+        try {
+            // Método 1: Usar una subconsulta para evitar el error de GROUP BY
+            $solicitudesPorDia = DB::table(function($query) {
+                $query->from('solicitudes')
+                    ->select(DB::raw('DATE(created_at) as fecha'))
+                    ->where('created_at', '>=', Carbon::now()->subDays(7))
+                    ->groupBy(DB::raw('DATE(created_at)'));
+            })->select('fecha', DB::raw('count(*) as total'))
+              ->groupBy('fecha')
+              ->orderBy('fecha')
+              ->get();
+        } catch (\Exception $e) {
+            // Método 2: Alternativa si el método 1 falla
+            try {
+                $sevenDaysAgo = Carbon::now()->subDays(7)->format('Y-m-d H:i:s');
+                $solicitudesPorDia = DB::select(
+                    "SELECT DATE(created_at) as fecha, COUNT(*) as total
+                     FROM solicitudes
+                     WHERE created_at >= ?
+                     GROUP BY DATE(created_at)
+                     ORDER BY fecha ASC",
+                    [$sevenDaysAgo]
+                );
+            } catch (\Exception $e2) {
+                // Método 3: Última alternativa
+                $solicitudesPorDia = [];
+                $startDate = Carbon::now()->subDays(7);
+                $endDate = Carbon::now();
+
+                for ($date = $startDate; $date->lte($endDate); $date->addDay()) {
+                    $dayStart = $date->copy()->startOfDay();
+                    $dayEnd = $date->copy()->endOfDay();
+
+                    $count = Solicitud::whereBetween('created_at', [$dayStart, $dayEnd])->count();
+
+                    $solicitudesPorDia[] = (object)[
+                        'fecha' => $date->format('Y-m-d'),
+                        'total' => $count
+                    ];
+                }
+            }
+        }
+
+        return response()->json([
+            'totalPacientes' => $totalPacientes,
+            'totalExamenes' => $totalExamenes,
+            'totalServicios' => $totalServicios,
+            'totalSolicitudes' => $totalSolicitudes,
+            'solicitudesPorEstado' => $solicitudesPorEstado,
+            'solicitudesRecientes' => $solicitudesRecientes,
+            'examenesMasSolicitados' => $examenesMasSolicitados,
+            'serviciosMasSolicitados' => $serviciosMasSolicitados,
+            'solicitudesPorDia' => $solicitudesPorDia,
+            'timestamp' => now()->toIso8601String()
+        ]);
+    }
+
+    /**
+     * Generar reporte por doctores
+     */
+    private function getDoctorsReport($startDate, $endDate)
+    {
+        // Contar solicitudes por usuario (doctores y administradores de laboratorio)
+        try {
+            $doctorStats = DB::table('solicitudes')
+                ->join('users', 'solicitudes.user_id', '=', 'users.id')
+                ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                ->select(
+                    'users.id',
+                    DB::raw("CONCAT(users.nombre, ' ', users.apellido) as name"),
+                    'users.role',
+                    'users.especialidad',
+                    'users.colegiatura',
+                    DB::raw('count(*) as count')
+                )
+                ->groupBy('users.id', 'users.nombre', 'users.apellido', 'users.role', 'users.especialidad', 'users.colegiatura')
+                ->orderByDesc('count')
+                ->get();
+        } catch (\Exception $e) {
+            // Alternativa usando consulta SQL directa
+            $doctorStats = DB::select(
+                "SELECT u.id, CONCAT(u.nombre, ' ', u.apellido) as name, u.role, u.especialidad, u.colegiatura, COUNT(*) as count
+                 FROM solicitudes s
+                 JOIN users u ON s.user_id = u.id
+                 WHERE s.fecha BETWEEN ? AND ?
+                 GROUP BY u.id, u.nombre, u.apellido, u.role, u.especialidad, u.colegiatura
+                 ORDER BY count DESC",
+                [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]
+            );
+        }
+
+        // Procesar los datos para mostrar información apropiada según el rol
+        foreach ($doctorStats as $stat) {
+            // Si es administrador de laboratorio, mostrar "Administrador de Laboratorio" en lugar de especialidad
+            if ($stat->role === 'laboratorio') {
+                $stat->especialidad = 'Administrador de Laboratorio';
+                $stat->colegiatura = null; // Los admin de lab no tienen colegiatura
+            }
+            // Si es doctor pero no tiene especialidad, mostrar "No especificada"
+            elseif ($stat->role === 'doctor' && empty($stat->especialidad)) {
+                $stat->especialidad = 'No especificada';
+            }
+        }
+
+        // Calcular porcentajes
+        $totalRequests = $doctorStats->sum('count');
+        foreach ($doctorStats as $stat) {
+            $stat->percentage = $totalRequests > 0 ? round(($stat->count / $totalRequests) * 100, 2) : 0;
+        }
+
+        // Obtener estadísticas adicionales
+        $totalPatients = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->distinct('paciente_id')
+            ->count('paciente_id');
+
+        // CORREGIDO: totalExams debe ser igual a totalRequests porque cada solicitud es "un examen"
+        $totalExams = $totalRequests;
+
+        // Obtener estadísticas de resultados por doctor
+        $resultStats = [];
+        foreach ($doctorStats as $doctor) {
+            $completedCount = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate, $doctor) {
+                    $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                          ->where('user_id', $doctor->id);
+                })
+                ->where('estado', 'completado')
+                ->count();
+
+            $pendingCount = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate, $doctor) {
+                    $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                          ->where('user_id', $doctor->id);
+                })
+                ->where('estado', 'pendiente')
+                ->count();
+
+            $inProcessCount = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate, $doctor) {
+                    $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                          ->where('user_id', $doctor->id);
+                })
+                ->where('estado', 'en_proceso')
+                ->count();
+
+            $resultStats[$doctor->id] = [
+                'completedCount' => $completedCount,
+                'pendingCount' => $pendingCount,
+                'inProcessCount' => $inProcessCount
+            ];
+        }
+
+        // Contar solicitudes por estado (para gráficos)
+        $statusCounts = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+            })
+            ->select('estado', DB::raw('count(*) as count'))
+            ->groupBy('estado')
+            ->get()
+            ->pluck('count', 'estado')
+            ->toArray();
+
+        return [
+            'doctorStats' => $doctorStats,
+            'resultStats' => $resultStats,
+            'pendingCount' => $statusCounts['pendiente'] ?? 0,
+            'inProcessCount' => $statusCounts['en_proceso'] ?? 0,
+            'completedCount' => $statusCounts['completado'] ?? 0,
+            'totalRequests' => $totalRequests,
+            'totalPatients' => $totalPatients,
+            'totalExams' => $totalExams
+        ];
+    }
+
+    /**
+     * Generar reporte por pacientes (Versión optimizada)
+     * 
+     * @param Carbon $startDate Fecha de inicio
+     * @param Carbon $endDate Fecha de fin
+     * @param bool $includeDetailedResults Si es true, incluir detalles completos (para Excel)
+     * @param int|null $page Número de página para paginación
+     * @param int|null $perPage Resultados por página
+     * @return array Datos del reporte
+     */
+    private function getPatientsReport($startDate, $endDate, $includeDetailedResults = false, $page = null, $perPage = null)
+    {
+        \Log::info('🔍 getPatientsReport optimizado', [
+            'includeDetailedResults' => $includeDetailedResults,
+            'page' => $page,
+            'perPage' => $perPage
+        ]);
+        
+        // Contar solicitudes por paciente con paginación
+        try {
+            $query = DB::table('solicitudes')
+                ->join('pacientes', 'solicitudes.paciente_id', '=', 'pacientes.id')
+                ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                ->select(
+                    'pacientes.id',
+                    DB::raw("CONCAT(pacientes.nombres, ' ', pacientes.apellidos) as name"),
+                    'pacientes.dni',
+                    'pacientes.historia_clinica',
+                    'pacientes.sexo',
+                    DB::raw('count(*) as count')
+                )
+                ->groupBy('pacientes.id', 'pacientes.nombres', 'pacientes.apellidos', 'pacientes.dni', 'pacientes.historia_clinica', 'pacientes.sexo')
+                ->orderByDesc('count');
+            
+            // Aplicar paginación si se solicita
+            if ($page !== null && $perPage !== null && !$includeDetailedResults) {
+                $patientStats = $query->paginate($perPage, ['*'], 'page', $page);
+                $patientCollection = $patientStats->items();
+                $pagination = [
+                    'current_page' => $patientStats->currentPage(),
+                    'last_page' => $patientStats->lastPage(),
+                    'per_page' => $patientStats->perPage(),
+                    'total' => $patientStats->total()
+                ];
+            } else {
+                $patientStats = $query->get();
+                $patientCollection = $patientStats;
+                $pagination = null;
+            }
+        } catch (\Exception $e) {
+            \Log::error('Error en consulta de pacientes', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            // Alternativa usando consulta SQL directa
+            $patientStats = DB::select(
+                "SELECT p.id, CONCAT(p.nombres, ' ', p.apellidos) as name, p.dni, p.historia_clinica, p.sexo, COUNT(*) as count
+                 FROM solicitudes s
+                 JOIN pacientes p ON s.paciente_id = p.id
+                 WHERE s.fecha BETWEEN ? AND ?
+                 GROUP BY p.id, p.nombres, p.apellidos, p.dni, p.historia_clinica, p.sexo
+                 ORDER BY count DESC",
+                [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]
+            );
+            $patientCollection = $patientStats;
+            $pagination = null;
+        }
+
+        // Calcular porcentajes
+        $totalRequests = DB::table('solicitudes')
+            ->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->count();
+            
+        foreach ($patientCollection as $stat) {
+            $stat->percentage = $totalRequests > 0 ? round(($stat->count / $totalRequests) * 100, 2) : 0;
+        }
+
+        \Log::info('🔍 Optimización de consultas - Evaluando necesidad de detalles de pacientes', [
+            'includeDetailedResults' => $includeDetailedResults
+        ]);
+        
+        // Solo procesar detalles si se solicita (para Excel)
+        $patientDetails = [];
+        if ($includeDetailedResults) {
+            foreach ($patientCollection as $patient) {
+                \Log::info("📊 Procesando paciente: {$patient->name} (ID: {$patient->id})");
+                
+                // Obtener TODAS las solicitudes del paciente con sus detalles en una sola consulta
+                $solicitudesCompletas = DB::table('solicitudes')
+                    ->join('users', 'solicitudes.user_id', '=', 'users.id')
+                    ->leftJoin('servicios', 'solicitudes.servicio_id', '=', 'servicios.id')
+                    ->leftJoin('detallesolicitud', 'solicitudes.id', '=', 'detallesolicitud.solicitud_id')
+                    ->leftJoin('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+                    ->leftJoin('categorias', 'examenes.categoria_id', '=', 'categorias.id')
+                    ->where('solicitudes.paciente_id', $patient->id)
+                    ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                    ->select(
+                        // Datos de la solicitud
+                        'solicitudes.id as solicitud_id',
+                        'solicitudes.fecha',
+                        'solicitudes.estado as solicitud_estado',
+                        DB::raw("CONCAT(users.nombre, ' ', users.apellido) as medico"),
+                        'servicios.nombre as servicio',
+                        // Datos del detalle de solicitud
+                        'detallesolicitud.id as detalle_id',
+                        'detallesolicitud.estado as examen_estado',
+                        'detallesolicitud.observaciones',
+                        'detallesolicitud.resultado as resultado_general',
+                        // Datos de los exámenes
+                        'examenes.id as examen_id',
+                        'examenes.nombre as examen_nombre',
+                        'examenes.codigo as examen_codigo',
+                        'categorias.nombre as categoria'
+                    )
+                    ->orderByDesc('solicitudes.fecha')
+                    ->orderBy('examenes.nombre')
+                    ->get();
+
+                // Agrupar los resultados por solicitud
+                $solicitudesConExamenes = [];
+                $solicitudesAgrupadas = $solicitudesCompletas->groupBy('solicitud_id');
+                
+                foreach ($solicitudesAgrupadas as $solicitudId => $filas) {
+                    $primeraFila = $filas->first();
+                    $examenes = $filas->groupBy('examen_id')->map(function($grupo) {
+                        return [
+                            'id' => $grupo->first()->examen_id,
+                            'nombre' => $grupo->first()->examen_nombre,
+                            'codigo' => $grupo->first()->examen_codigo,
+                            'estado' => $grupo->first()->examen_estado,
+                            'categoria' => $grupo->first()->categoria,
+                            'resultado' => $grupo->first()->resultado_general
+                        ];
+                    })->values();
+                    
+                    $solicitudesConExamenes[] = [
+                        'solicitud_id' => $solicitudId,
+                        'fecha' => $primeraFila->fecha,
+                        'medico' => $primeraFila->medico,
+                        'servicio' => $primeraFila->servicio,
+                        'estado' => $primeraFila->solicitud_estado,
+                        'examenes' => $examenes,
+                        'total_examenes' => count($examenes)
+                    ];
+                }
+
+                $patientDetails[$patient->id] = [
+                    'info' => $patient,
+                    'solicitudes' => $solicitudesConExamenes,
+                    'total_solicitudes' => count($solicitudesConExamenes),
+                    'total_examenes' => collect($solicitudesConExamenes)->sum('total_examenes')
+                ];
+            }
+        }
+
+        // Obtener estadísticas adicionales
+        $totalDoctors = DB::table('solicitudes')
+            ->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->distinct('user_id')
+            ->count('user_id');
+
+        // Estadísticas por género
+        $genderStatsRaw = DB::table('solicitudes')
+            ->join('pacientes', 'solicitudes.paciente_id', '=', 'pacientes.id')
+            ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->select('pacientes.sexo', DB::raw('count(*) as count'))
+            ->groupBy('pacientes.sexo')
+            ->get()
+            ->pluck('count', 'sexo')
+            ->toArray();
+
+        // Mapear los valores de género
+        $genderStats = [];
+        foreach ($genderStatsRaw as $sexo => $count) {
+            $sexoLower = strtolower(trim($sexo));
+            if (in_array($sexoLower, ['masculino', 'hombre', 'm'])) {
+                $genderStats['M'] = ($genderStats['M'] ?? 0) + $count;
+            } elseif (in_array($sexoLower, ['femenino', 'mujer', 'f'])) {
+                $genderStats['F'] = ($genderStats['F'] ?? 0) + $count;
+            } else {
+                $genderStats['O'] = ($genderStats['O'] ?? 0) + $count;
+            }
+        }
+
+        // Contar solicitudes por estado
+        $statusCounts = DB::table('detallesolicitud')
+            ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+            ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+            ->select('detallesolicitud.estado', DB::raw('count(*) as count'))
+            ->groupBy('detallesolicitud.estado')
+            ->get()
+            ->pluck('count', 'estado')
+            ->toArray();
+
+        return [
+            'patientStats' => $patientCollection,
+            'patientDetails' => $patientDetails,
+            'genderStats' => $genderStats,
+            'totalRequests' => $totalRequests,
+            'totalDoctors' => $totalDoctors,
+            'totalExams' => $totalRequests, // Cada solicitud es un examen
+            'pendingCount' => $statusCounts['pendiente'] ?? 0,
+            'inProcessCount' => $statusCounts['en_proceso'] ?? 0,
+            'completedCount' => $statusCounts['completado'] ?? 0,
+            'pagination' => $pagination
+        ];
+    }
+
+    /**
+     * Generar reporte por resultados
+     */
+    private function getResultsReport($startDate, $endDate, $status = null, $includeDetailedResults = false)
+    {
+        // SIEMPRE incluir detalles cuando sea para Excel
+        $includeDetailedResults = true;
+        
+        \Log::info('🔧 getResultsReport called with parameters:', [
+            'startDate' => $startDate->format('Y-m-d'),
+            'endDate' => $endDate->format('Y-m-d'),
+            'status' => $status,
+            'includeDetailedResults' => $includeDetailedResults,
+            'type' => gettype($includeDetailedResults)
+        ]);
+        // Crear query base con filtro de fechas
+        $baseQuery = function ($query) use ($startDate, $endDate) {
+            $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+        };
+
+        // Contar resultados por estado (siempre mostrar todos los estados para el gráfico)
+        $statusCountsQuery = DetalleSolicitud::whereHas('solicitud', $baseQuery);
+
+        // Si hay filtro de estado, aplicarlo también a los conteos
+        if ($status) {
+            $statusCountsQuery->where('estado', $status);
+        }
+
+        $statusCounts = $statusCountsQuery
+            ->select('estado', DB::raw('count(*) as count'))
+            ->groupBy('estado')
+            ->get()
+            ->pluck('count', 'estado')
+            ->toArray();
+
+        // Si se filtró por estado específico, asegurar que solo ese estado tenga datos
+        if ($status) {
+            $filteredStatusCounts = [];
+            foreach (['pendiente', 'en_proceso', 'completado'] as $state) {
+                $filteredStatusCounts[$state] = ($state === $status) ? ($statusCounts[$state] ?? 0) : 0;
+            }
+            $statusCounts = $filteredStatusCounts;
+        }
+
+        // Contar resultados por día
+        try {
+            $dailyStatsQuery = DB::table('detallesolicitud')
+                ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+                ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+
+            // Aplicar filtro de estado si existe
+            if ($status) {
+                $dailyStatsQuery->where('detallesolicitud.estado', $status);
+            }
+
+            $dailyStats = $dailyStatsQuery
+                ->select(
+                    'solicitudes.fecha as date',
+                    'detallesolicitud.estado',
+                    DB::raw('count(*) as count')
+                )
+                ->groupBy('solicitudes.fecha', 'detallesolicitud.estado')
+                ->orderBy('date')
+                ->get();
+        } catch (\Exception $e) {
+            // Alternativa usando consulta SQL directa
+            $whereClause = "s.fecha BETWEEN ? AND ?";
+            $params = [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')];
+
+            if ($status) {
+                $whereClause .= " AND d.estado = ?";
+                $params[] = $status;
+            }
+
+            $dailyStats = DB::select(
+                "SELECT s.fecha as date, d.estado, COUNT(*) as count
+                 FROM detallesolicitud d
+                 JOIN solicitudes s ON d.solicitud_id = s.id
+                 WHERE {$whereClause}
+                 GROUP BY s.fecha, d.estado
+                 ORDER BY date ASC",
+                $params
+            );
+        }
+
+        // Reorganizar los datos diarios para facilitar su uso en el frontend y PDF
+        $formattedDailyStats = [];
+        foreach ($dailyStats as $stat) {
+            if (!isset($formattedDailyStats[$stat->date])) {
+                $formattedDailyStats[$stat->date] = [
+                    'date' => $stat->date,
+                    'fecha' => $stat->date,
+                    'total' => 0,
+                    'count' => 0,
+                    'pendiente' => 0,
+                    'en_proceso' => 0,
+                    'completado' => 0,
+                    'pending' => 0,
+                    'in_process' => 0,
+                    'completed' => 0
+                ];
+            }
+
+            // Agregar el conteo al estado específico
+            $formattedDailyStats[$stat->date][$stat->estado] = $stat->count;
+            $formattedDailyStats[$stat->date]['total'] += $stat->count;
+            $formattedDailyStats[$stat->date]['count'] += $stat->count;
+
+            // También agregar con nombres en inglés para compatibilidad con plantilla PDF
+            if ($stat->estado === 'pendiente') {
+                $formattedDailyStats[$stat->date]['pending'] = $stat->count;
+            } elseif ($stat->estado === 'en_proceso') {
+                $formattedDailyStats[$stat->date]['in_process'] = $stat->count;
+            } elseif ($stat->estado === 'completado') {
+                $formattedDailyStats[$stat->date]['completed'] = $stat->count;
+            }
+        }
+
+        // Convertir a array indexado para el frontend
+        $formattedDailyStats = array_values($formattedDailyStats);
+
+        // Obtener estadísticas de tiempo promedio de procesamiento
+        try {
+            // Construir la consulta SQL con filtros dinámicos
+            $whereClause = "s.fecha BETWEEN ? AND ? AND d.completed_at IS NOT NULL";
+            $params = [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')];
+
+            // Si hay filtro de estado, aplicarlo (solo tiene sentido para 'completado')
+            if ($status) {
+                $whereClause .= " AND d.estado = ?";
+                $params[] = $status;
+            } else {
+                // Si no hay filtro específico, solo mostrar completados para el tiempo promedio
+                $whereClause .= " AND d.estado = 'completado'";
+            }
+
+            $processingTimeStats = DB::select(
+                "SELECT
+                    d.examen_id,
+                    AVG(TIMESTAMPDIFF(MINUTE, s.fecha, d.completed_at)) / 60 as avg_hours
+                FROM detallesolicitud d
+                JOIN solicitudes s ON d.solicitud_id = s.id
+                WHERE {$whereClause}
+                GROUP BY d.examen_id",
+                $params
+            );
+
+            // Cargar información de exámenes
+            foreach ($processingTimeStats as $stat) {
+                $examen = \App\Models\Examen::find($stat->examen_id);
+                if ($examen) {
+                    $stat->examen = $examen;
+                }
+            }
+        } catch (\Exception $e) {
+            \Log::error('Error al calcular tiempo promedio: ' . $e->getMessage());
+            $processingTimeStats = [];
+        }
+
+        // Totales (aplicar filtro de estado si existe)
+        if ($status) {
+            // Si hay filtro de estado, contar solo las solicitudes que tienen al menos un detalle con ese estado
+            $totalRequests = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                ->whereHas('detalles', function ($query) use ($status) {
+                    $query->where('estado', $status);
+                })
+                ->count();
+
+            $totalPatients = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                ->whereHas('detalles', function ($query) use ($status) {
+                    $query->where('estado', $status);
+                })
+                ->distinct('paciente_id')
+                ->count('paciente_id');
+
+            // CORREGIDO: totalExams debe ser igual a totalRequests porque cada solicitud es "un examen"
+            $totalExams = $totalRequests;
+        } else {
+            // Sin filtro de estado, mostrar todos
+            $totalRequests = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])->count();
+            $totalPatients = Solicitud::whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                ->distinct('paciente_id')
+                ->count('paciente_id');
+            // CORREGIDO: totalExams debe ser igual a totalRequests porque cada solicitud es "un examen"
+            $totalExams = $totalRequests;
+        }
+
+        // Si se solicitan detalles, incluir información completa de resultados (similar a getPatientsReport)
+        $resultDetails = [];
+        \Log::info('🔧 getResultsReport - Checking includeDetailedResults', [
+            'includeDetailedResults' => $includeDetailedResults,
+            'is_true' => $includeDetailedResults === true,
+            'type' => gettype($includeDetailedResults)
+        ]);
+        
+        if ($includeDetailedResults) {
+            \Log::info('🔧 Obtener detalles de resultados para Excel de resultados');
+            
+            // Obtener todos los detalles de solicitud que coincidan con los filtros
+            $baseQuery = DetalleSolicitud::whereHas('solicitud', function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+            });
+            
+            if ($status) {
+                $baseQuery->where('estado', $status);
+            }
+            
+            // Obtener información completa de exámenes y resultados con JOIN optimizado
+            $resultadosCompletos = DB::table('detallesolicitud')
+                ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+                ->join('pacientes', 'solicitudes.paciente_id', '=', 'pacientes.id')
+                ->join('users', 'solicitudes.user_id', '=', 'users.id')
+                ->leftJoin('servicios', 'solicitudes.servicio_id', '=', 'servicios.id')
+                ->leftJoin('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+                ->leftJoin('categorias', 'examenes.categoria_id', '=', 'categorias.id')
+                ->leftJoin('valores_resultado', 'detallesolicitud.id', '=', 'valores_resultado.detalle_solicitud_id')
+                ->leftJoin('campos_examen', 'valores_resultado.campo_examen_id', '=', 'campos_examen.id')
+                ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+                ->when($status, function ($query) use ($status) {
+                    return $query->where('detallesolicitud.estado', $status);
+                })
+                ->select(
+                    // Datos del paciente
+                    'pacientes.id as paciente_id',
+                    DB::raw("CONCAT(pacientes.nombres, ' ', pacientes.apellidos) as paciente_nombre"),
+                    'pacientes.dni',
+                    'pacientes.historia_clinica',
+                    'pacientes.sexo',
+                    // Datos de la solicitud
+                    'solicitudes.id as solicitud_id',
+                    'solicitudes.fecha',
+                    'solicitudes.estado as solicitud_estado',
+                    DB::raw("CONCAT(users.nombre, ' ', users.apellido) as medico"),
+                    'servicios.nombre as servicio',
+                    // Datos del detalle de solicitud
+                    'detallesolicitud.id as detalle_id',
+                    'detallesolicitud.estado as examen_estado',
+                    'detallesolicitud.observaciones',
+                    'detallesolicitud.resultado as resultado_general',
+                    // Datos de los exámenes
+                    'examenes.id as examen_id',
+                    'examenes.nombre as examen_nombre',
+                    'examenes.codigo as examen_codigo',
+                    // Los campos unidad y valor_referencia están en la tabla campos_examen, no en examenes
+                    DB::raw("'' as examen_unidad"), // Campo placeholder
+                    DB::raw("'' as valor_referencia"), // Campo placeholder
+                    'categorias.nombre as categoria',
+                    // Datos de los resultados específicos
+                    'valores_resultado.id as valor_resultado_id',
+                    'valores_resultado.valor as resultado_valor',
+                    'valores_resultado.observaciones as resultado_observaciones',
+                    'valores_resultado.fuera_rango',
+                    'valores_resultado.created_at as fecha_resultado',
+                    'valores_resultado.updated_at as fecha_actualizacion_resultado',
+                    // Datos del campo del examen
+                    'campos_examen.nombre as campo_nombre',
+                    'campos_examen.unidad as campo_unidad',
+                    'campos_examen.tipo as campo_tipo',
+                    'campos_examen.valor_referencia as campo_valor_referencia'
+                )
+                ->orderByDesc('solicitudes.fecha')
+                ->orderBy('pacientes.nombres')
+                ->orderBy('examenes.nombre')
+                ->orderBy('campos_examen.orden')
+                ->get();
+            
+            \Log::info('🔧 Resultados completos obtenidos: ' . count($resultadosCompletos));
+            
+            // Si no hay resultados, aún registrar el intento
+            if (empty($resultadosCompletos)) {
+                \Log::warning('🔧 EXCEL: No se encontraron resultados detallados en la base de datos para el período seleccionado');
+            } else {
+                \Log::info('🔧 EXCEL: Se encontraron ' . count($resultadosCompletos) . ' resultados detallados');
+            }
+            
+            // Agregar los resultados reales al array de datos
+            $data['resultDetails'] = $resultadosCompletos;
+            $data['includeDetailedResults'] = true;
+            
+            \Log::info('🔧 EXCEL: Resultados detallados reales añadidos');
+        }
+        
+        // Forzar incluir detalles adicionales para Excel de servicios
+        if ($type === 'services') {
+            \Log::info('🔧 EXCEL: Obteniendo detalles adicionales para el reporte de servicios');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Obtener detalles adicionales para servicios
+            $serviciosDetalles = $this->getServicesDetailsForExcel($startDate, $endDate);
+            
+            // Agregar los detalles al array de datos
+            $data['servicesDetails'] = $serviciosDetalles;
+            $data['includeServicesDetails'] = true;
+            
+            \Log::info('🔧 EXCEL: Detalles de servicios añadidos');
+        }
+        
+        // Forzar incluir detalles adicionales para Excel de exámenes
+        if ($type === 'exams') {
+            \Log::info('🔧 EXCEL: Obteniendo detalles adicionales para el reporte de exámenes');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Obtener detalles adicionales para exámenes
+            $examsIds = $request->input('exam_ids');
+            $filterByExams = $request->input('filter_by_exams', false);
+            $examenesDetalles = $this->getExamsDetailsForExcel($startDate, $endDate, $examsIds, $filterByExams);
+            
+            // Agregar los detalles al array de datos
+            $data['examsDetails'] = $examenesDetalles;
+            $data['includeExamsDetails'] = true;
+            
+            \Log::info('🔧 EXCEL: Detalles de exámenes añadidos');
+        }
+        
+        // Forzar incluir detalles adicionales para Excel de doctores
+        if ($type === 'doctors') {
+            \Log::info('🔧 EXCEL: Obteniendo detalles adicionales para el reporte de doctores');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Obtener detalles adicionales para doctores
+            $doctoresDetalles = $this->getDoctorsDetailsForExcel($startDate, $endDate);
+            
+            // Agregar los detalles al array de datos
+            $data['doctorsDetails'] = $doctoresDetalles;
+            $data['includeDoctorsDetails'] = true;
+            
+            \Log::info('🔧 EXCEL: Detalles de doctores añadidos');
+        }
+
+        // Agregar información del usuario que genera el reporte
+        $data['generatedBy'] = $request->user()->nombre . ' ' . $request->user()->apellido;
+        $data['generatedByRole'] = $request->user()->role;
+        
+        // Debug: Log structure of data being passed to Excel
+        \Log::info('Excel Data Structure Debug:', [
+            'type' => $type,
+            'data_keys' => array_keys($data),
+            'has_patientStats' => isset($data['patientStats']),
+            'has_genderStats' => isset($data['genderStats']),
+            'has_totalPatients' => isset($data['totalPatients']),
+            'has_pendingCount' => isset($data['pendingCount']),
+            'patientStats_count' => isset($data['patientStats']) ? count($data['patientStats']) : 'N/A',
+            'genderStats_content' => $data['genderStats'] ?? 'Not set',
+            'generatedBy' => $data['generatedBy'],
+            'generatedByRole' => $data['generatedByRole']
+        ]);
+
+        // Crear el export con los datos
+        $export = new ReportExcelExport($data, $type, $startDate, $endDate);
+        
+        // Generar nombre del archivo
+        $fileName = "reporte_{$type}_{$startDate}_{$endDate}.xlsx";
+
+        // Usar Excel::download de maatwebsite/excel
+        return Excel::download($export, $fileName);
+
+    } catch (\Exception $e) {
+        \Log::error('Error generating Excel report:', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+
+        return response()->json([
+            'error' => 'Error al generar el reporte Excel: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+/**
+ * Obtener detalles específicos de resultados para Excel
+ * Este método está separado para asegurar que siempre se incluyan los detalles completos en Excel
+ */
+private function getResultsDetailsForExcel($startDate, $endDate, $status = null)
+{
+    \Log::info('🔧 getResultsDetailsForExcel called with parameters:', [
+        'startDate' => $startDate->format('Y-m-d'),
+        'endDate' => $endDate->format('Y-m-d'),
+        'status' => $status
+    ]);
+    
+    $resultDetails = [];
+    
+    // Obtener información completa de exámenes y resultados con JOIN optimizado
+    $resultadosCompletos = DB::table('detallesolicitud')
+        ->join('solicitudes', 'detallesolicitud.solicitud_id', '=', 'solicitudes.id')
+        ->join('pacientes', 'solicitudes.paciente_id', '=', 'pacientes.id')
+        ->join('users', 'solicitudes.user_id', '=', 'users.id')
+        ->leftJoin('servicios', 'solicitudes.servicio_id', '=', 'servicios.id')
+        ->leftJoin('examenes', 'detallesolicitud.examen_id', '=', 'examenes.id')
+        ->leftJoin('categorias', 'examenes.categoria_id', '=', 'categorias.id')
+        ->leftJoin('valores_resultado', 'detallesolicitud.id', '=', 'valores_resultado.detalle_solicitud_id')
+        ->leftJoin('campos_examen', 'valores_resultado.campo_examen_id', '=', 'campos_examen.id')
+        ->whereBetween('solicitudes.fecha', [$startDate->format('Y-m-d'), $endDate->format('Y-m-d')])
+        ->when($status, function ($query) use ($status) {
+            return $query->where('detallesolicitud.estado', $status);
+        })
+        ->select(
+            // Datos del paciente
+            'pacientes.id as paciente_id',
+            DB::raw("CONCAT(pacientes.nombres, ' ', pacientes.apellidos) as paciente_nombre"),
+            'pacientes.dni',
+            'pacientes.historia_clinica',
+            'pacientes.sexo',
+            // Datos de la solicitud
+            'solicitudes.id as solicitud_id',
+            'solicitudes.fecha',
+            'solicitudes.estado as solicitud_estado',
+            DB::raw("CONCAT(users.nombre, ' ', users.apellido) as medico"),
+            'servicios.nombre as servicio',
+            // Datos del detalle de solicitud
+            'detallesolicitud.id as detalle_id',
+            'detallesolicitud.estado as examen_estado',
+            'detallesolicitud.observaciones',
+            'detallesolicitud.resultado as resultado_general',
+            // Datos de los exámenes
+            'examenes.id as examen_id',
+            'examenes.nombre as examen_nombre',
+            'examenes.codigo as examen_codigo',
+            // Los campos unidad y valor_referencia están en la tabla campos_examen, no en examenes
+            DB::raw("'' as examen_unidad"), // Campo placeholder
+            DB::raw("'' as valor_referencia"), // Campo placeholder
+            'categorias.nombre as categoria',
+            // Datos de los resultados específicos
+            'valores_resultado.id as valor_resultado_id',
+            'valores_resultado.valor as resultado_valor',
+            'valores_resultado.observaciones as resultado_observaciones',
+            'valores_resultado.fuera_rango',
+            'valores_resultado.created_at as fecha_resultado',
+            'valores_resultado.updated_at as fecha_actualizacion_resultado',
+            // Datos del campo del examen
+            'campos_examen.nombre as campo_nombre',
+            'campos_examen.unidad as campo_unidad',
+            'campos_examen.tipo as campo_tipo',
+            'campos_examen.valor_referencia as campo_valor_referencia'
+        )
+        ->orderByDesc('solicitudes.fecha')
+        ->orderBy('pacientes.nombres')
+        ->orderBy('examenes.nombre')
+        ->orderBy('campos_examen.orden')
+        ->get();
+    
+    \Log::info('🔧 getResultsDetailsForExcel - Resultados completos obtenidos: ' . count($resultadosCompletos));
+    
+    if (count($resultadosCompletos) === 0) {
+        // Si no hay resultados, crear una entrada dummy para que al menos aparezca la hoja en Excel
+        return [
+            [
+                'solicitud_id' => 0,
+                'fecha' => date('Y-m-d'),
+                'solicitud_estado' => 'No hay datos en el rango de fechas',
+                'medico' => 'N/A',
+                'servicio' => 'N/A',
+                'paciente_id' => 0,
+                'paciente_nombre' => 'No hay pacientes en el rango de fechas',
+                'dni' => 'N/A',
+                'historia_clinica' => 'N/A',
+                'sexo' => 'N/A',
+                'examenes' => [],
+                'total_examenes' => 0,
+                'examenes_con_resultados_detallados' => 0,
+                'examenes_con_resultado_general' => 0,
+                'examenes_sin_resultados' => 0
+            ]
+        ];
+    }
+    
+    // Agrupar por solicitud, luego por examen, luego por paciente para el Excel
+    $solicitudesPorId = $resultadosCompletos->groupBy('solicitud_id');
+    
+    foreach ($solicitudesPorId as $solicitudId => $filas) {
+        $primeraFila = $filas->first();
+        
+        // Obtener información básica de la solicitud
+        $solicitudInfo = [
+            'solicitud_id' => $solicitudId,
+            'fecha' => $primeraFila->fecha,
+            'solicitud_estado' => $primeraFila->solicitud_estado,
+            'medico' => $primeraFila->medico,
+            'servicio' => $primeraFila->servicio,
+            'paciente_id' => $primeraFila->paciente_id,
+            'paciente_nombre' => $primeraFila->paciente_nombre,
+            'dni' => $primeraFila->dni,
+            'historia_clinica' => $primeraFila->historia_clinica,
+            'sexo' => $primeraFila->sexo
+        ];
+        
+        // Agrupar por examen
+        $examenesPorId = $filas->groupBy('examen_id');
+        $examenesConResultados = [];
+        
+        foreach ($examenesPorId as $examenId => $filasExamen) {
+            if (empty($examenId)) continue;
+            
+            $primeraFilaExamen = $filasExamen->first();
+            
+            // Obtener todos los valores de resultado de este examen
+            $valoresResultado = $filasExamen->filter(function($fila) {
+                return !empty($fila->valor_resultado_id);
+            })->map(function($fila) {
+                return [
+                    'valor_resultado_id' => $fila->valor_resultado_id,
+                    'campo_nombre' => $fila->campo_nombre,
+                    'campo_unidad' => $fila->campo_unidad,
+                    'campo_tipo' => $fila->campo_tipo,
+                    'campo_valor_referencia' => $fila->campo_valor_referencia,
+                    'valor' => $fila->resultado_valor,
+                    'observaciones' => $fila->resultado_observaciones,
+                    'fuera_rango' => $fila->fuera_rango,
+                    'fecha_resultado' => $fila->fecha_resultado,
+                    'fecha_actualizacion' => $fila->fecha_actualizacion_resultado
+                ];
+            })->values()->toArray();
+            
+            $examenesConResultados[] = [
+                'detalle_id' => $primeraFilaExamen->detalle_id,
+                'examen_id' => $examenId,
+                'examen_nombre' => $primeraFilaExamen->examen_nombre,
+                'examen_codigo' => $primeraFilaExamen->examen_codigo,
+                'examen_unidad' => $primeraFilaExamen->examen_unidad,
+                'valor_referencia' => $primeraFilaExamen->valor_referencia,
+                'categoria' => $primeraFilaExamen->categoria,
+                'examen_estado' => $primeraFilaExamen->examen_estado,
+                'observaciones_examen' => $primeraFilaExamen->observaciones,
+                'resultado_general' => $primeraFilaExamen->resultado_general,
+                'fecha_solicitud_examen' => $primeraFilaExamen->fecha_solicitud_examen,
+                'ultima_actualizacion_examen' => $primeraFilaExamen->ultima_actualizacion_examen,
+                'valores_resultado' => $valoresResultado,
+                'total_valores_resultado' => count($valoresResultado),
+                'tiene_resultados_detallados' => count($valoresResultado) > 0,
+                'tiene_resultado_general' => !empty($primeraFilaExamen->resultado_general)
+            ];
+        }
+        
+        $resultDetails[] = array_merge($solicitudInfo, [
+            'examenes' => $examenesConResultados,
+            'total_examenes' => count($examenesConResultados),
+            'examenes_con_resultados_detallados' => count(array_filter($examenesConResultados, function($e) { 
+                return $e['tiene_resultados_detallados']; 
+            })),
+            'examenes_con_resultado_general' => count(array_filter($examenesConResultados, function($e) { 
+                return $e['tiene_resultado_general']; 
+            })),
+            'examenes_sin_resultados' => count(array_filter($examenesConResultados, function($e) { 
+                return !$e['tiene_resultados_detallados'] && !$e['tiene_resultado_general']; 
+            }))
+        ];
+    }
+
+    return [
+        'statusCounts' => $statusCounts,
+        'dailyStats' => $formattedDailyStats,
+        'processingTimeStats' => $processingTimeStats,
+        'totalRequests' => $totalRequests,
+        'totalPatients' => $totalPatients,
+        'totalExams' => $totalExams,
+        'pendingCount' => $statusCounts['pendiente'] ?? 0,
+        'inProcessCount' => $statusCounts['en_proceso'] ?? 0,
+        'completedCount' => $statusCounts['completado'] ?? 0,
+        'filteredByStatus' => !empty($status),
+        'statusFilter' => $status,
+        // Agregar detalles para Excel si se solicitaron
+        'resultDetails' => $resultDetails,
+        'includeDetailedResults' => $includeDetailedResults
+    ];
+}
+
+/**
+ * Generar reporte en formato Excel
+ */
+public function generateExcel(Request $request)
+{
+    try {
+        $type = $request->input('type', 'general');
+        $startDate = $request->input('start_date');
+        $endDate = $request->input('end_date');
+
+
+
+        // Validar fechas
+        if (!$startDate || !$endDate) {
+            return response()->json([
+                'error' => 'Las fechas de inicio y fin son requeridas'
+            ], 400);
+        }
+
+        // Obtener los datos del reporte usando el mismo método que para JSON
+        $reportRequest = new Request($request->all());
+        $reportRequest->merge(['excel' => true]); // Flag to indicate this is for Excel export
+        $reportResponse = $this->getReports($reportRequest);
+        $reportData = $reportResponse->getData(true);
+
+        if (!$reportData['status']) {
+            return response()->json([
+                'error' => 'Error al obtener datos del reporte: ' . $reportData['message']
+            ], 500);
+        }
+
+        $data = $reportData['data'];
+
+        // Forzar incluir detalles para Excel de resultados
+        if ($type === 'results') {
+            \Log::info('🔧 EXCEL: Obteniendo resultados detallados reales para el reporte de resultados');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Usar los datos reales de la base de datos en lugar de ejemplos
+            $resultadosCompletos = $this->getResultsDetailsForExcel($startDate, $endDate, $request->input('status'));
+            
+            // Si no hay resultados, aún registrar el intento
+            if (empty($resultadosCompletos)) {
+                \Log::warning('🔧 EXCEL: No se encontraron resultados detallados en la base de datos para el período seleccionado');
+            } else {
+                \Log::info('🔧 EXCEL: Se encontraron ' . count($resultadosCompletos) . ' resultados detallados');
+            }
+            
+            // Agregar los resultados reales al array de datos
+            $data['resultDetails'] = $resultadosCompletos;
+            $data['includeDetailedResults'] = true;
+            
+            \Log::info('🔧 EXCEL: Resultados detallados reales añadidos');
+        }
+        
+        // Forzar incluir detalles adicionales para Excel de servicios
+        if ($type === 'services') {
+            \Log::info('🔧 EXCEL: Obteniendo detalles adicionales para el reporte de servicios');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Obtener detalles adicionales para servicios
+            $serviciosDetalles = $this->getServicesDetailsForExcel($startDate, $endDate);
+            
+            // Agregar los detalles al array de datos
+            $data['servicesDetails'] = $serviciosDetalles;
+            $data['includeServicesDetails'] = true;
+            
+            \Log::info('🔧 EXCEL: Detalles de servicios añadidos');
+        }
+        
+        // Forzar incluir detalles adicionales para Excel de exámenes
+        if ($type === 'exams') {
+            \Log::info('🔧 EXCEL: Obteniendo detalles adicionales para el reporte de exámenes');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Obtener detalles adicionales para exámenes
+            $examsIds = $request->input('exam_ids');
+            $filterByExams = $request->input('filter_by_exams', false);
+            $examenesDetalles = $this->getExamsDetailsForExcel($startDate, $endDate, $examsIds, $filterByExams);
+            
+            // Agregar los detalles al array de datos
+            $data['examsDetails'] = $examenesDetalles;
+            $data['includeExamsDetails'] = true;
+            
+            \Log::info('🔧 EXCEL: Detalles de exámenes añadidos');
+        }
+        
+        // Forzar incluir detalles adicionales para Excel de doctores
+        if ($type === 'doctors') {
+            \Log::info('🔧 EXCEL: Obteniendo detalles adicionales para el reporte de doctores');
+            
+            // Asegurar que $startDate y $endDate sean objetos Carbon
+            if (!($startDate instanceof \Carbon\Carbon)) {
+                $startDate = \Carbon\Carbon::parse($startDate)->startOfDay();
+            }
+            if (!($endDate instanceof \Carbon\Carbon)) {
+                $endDate = \Carbon\Carbon::parse($endDate)->endOfDay();
+            }
+            
+            // Obtener detalles adicionales para doctores
+            $doctoresDetalles = $this->getDoctorsDetailsForExcel($startDate, $endDate);
+            
+            // Agregar los detalles al array de datos
+            $data['doctorsDetails'] = $doctoresDetalles;
+            $data['includeDoctorsDetails'] = true;
+            
+            \Log::info('🔧 EXCEL: Detalles de doctores añadidos');
+        }
+
+        // Agregar información del usuario que genera el reporte
+        $data['generatedBy'] = $request->user()->nombre . ' ' . $request->user()->apellido;
+        $data['generatedByRole'] = $request->user()->role;
+        
+        // Debug: Log structure of data being passed to Excel
+        \Log::info('Excel Data Structure Debug:', [
+            'type' => $type,
+            'data_keys' => array_keys($data),
+            'has_patientStats' => isset($data['patientStats']),
+            'has_genderStats' => isset($data['genderStats']),
+            'has_totalPatients' => isset($data['totalPatients']),
+            'has_pendingCount' => isset($data['pendingCount']),
+            'patientStats_count' => isset($data['patientStats']) ? count($data['patientStats']) : 'N/A',
+            'genderStats_content' => $data['genderStats'] ?? 'Not set',
+            'generatedBy' => $data['generatedBy'],
+            'generatedByRole' => $data['generatedByRole']
+        ]);
+
+        // Crear el export con los datos
+        $export = new ReportExcelExport($data, $type, $startDate, $endDate);
+        
+        // Generar nombre del archivo
+        $fileName = "reporte_{$type}_{$startDate}_{$endDate}.xlsx";
+
+        // Usar Excel::download de maatwebsite/excel
+        return Excel::download($export, $fileName);
+
+    } catch (\Exception $e) {
+        \Log::error('Error generating Excel report:', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+
+        return response()->json([
+            'error' => 'Error al generar el reporte Excel: ' . $e->getMessage()
+        ], 500);
+    }
+}

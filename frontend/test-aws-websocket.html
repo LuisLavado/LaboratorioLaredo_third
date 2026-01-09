@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prueba WebSocket AWS EC2</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        .connecting { background-color: #fff3cd; color: #856404; }
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            margin: 10px 0;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .info {
+            background-color: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔌 Prueba WebSocket AWS EC2</h1>
+        <p>Prueba de conexión al servidor webhook en AWS EC2: <strong>3.14.3.69:3001</strong></p>
+        
+        <div class="info">
+            <strong>📋 Información:</strong><br>
+            • URL WebSocket: ws://3.14.3.69:3001<br>
+            • Protocolo: Socket.IO<br>
+            • Transporte: WebSocket + Polling<br>
+        </div>
+
+        <div id="status" class="status disconnected">
+            ❌ Desconectado
+        </div>
+
+        <div>
+            <button id="connectBtn" onclick="connect()">Conectar</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Desconectar</button>
+            <button onclick="authenticate()">Autenticar</button>
+            <button onclick="sendPing()">Enviar Ping</button>
+            <button onclick="clearLog()">Limpiar Log</button>
+        </div>
+
+        <h3>📋 Log de Eventos:</h3>
+        <div id="log" class="log"></div>
+    </div>
+
+    <!-- Socket.IO desde CDN -->
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    
+    <script>
+        let socket = null;
+        const statusDiv = document.getElementById('status');
+        const logDiv = document.getElementById('log');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.innerHTML = `<span style="color: #666;">[${timestamp}]</span> ${message}`;
+            
+            if (type === 'error') {
+                logEntry.style.color = '#dc3545';
+            } else if (type === 'success') {
+                logEntry.style.color = '#28a745';
+            } else if (type === 'warning') {
+                logEntry.style.color = '#ffc107';
+            }
+            
+            logDiv.appendChild(logEntry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function updateStatus(status, message) {
+            statusDiv.className = `status ${status}`;
+            statusDiv.innerHTML = message;
+        }
+
+        function connect() {
+            if (socket) {
+                log('Ya hay una conexión activa', 'warning');
+                return;
+            }
+
+            log('🔌 Intentando conectar a ws://3.14.3.69:3001...');
+            updateStatus('connecting', '🔄 Conectando...');
+
+            socket = io('http://3.14.3.69:3001', {
+                transports: ['websocket', 'polling'],
+                timeout: 10000,
+                forceNew: true,
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 2000,
+            });
+
+            // Eventos de conexión
+            socket.on('connect', () => {
+                log('✅ Conectado exitosamente!', 'success');
+                log(`📍 Socket ID: ${socket.id}`, 'success');
+                updateStatus('connected', '✅ Conectado');
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            });
+
+            socket.on('disconnect', (reason) => {
+                log(`❌ Desconectado: ${reason}`, 'error');
+                updateStatus('disconnected', '❌ Desconectado');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                socket = null;
+            });
+
+            socket.on('connect_error', (error) => {
+                log(`❌ Error de conexión: ${error.message}`, 'error');
+                updateStatus('disconnected', '❌ Error de conexión');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                socket = null;
+            });
+
+            // Eventos de autenticación
+            socket.on('authenticated', (data) => {
+                log(`🔐 Autenticado exitosamente: ${JSON.stringify(data)}`, 'success');
+            });
+
+            socket.on('auth_error', (error) => {
+                log(`🔐 Error de autenticación: ${JSON.stringify(error)}`, 'error');
+            });
+
+            // Eventos de notificaciones
+            socket.on('solicitud.created', (data) => {
+                log(`📨 Nueva solicitud: ${JSON.stringify(data)}`, 'success');
+            });
+
+            socket.on('solicitud.completed', (data) => {
+                log(`📨 Solicitud completada: ${JSON.stringify(data)}`, 'success');
+            });
+
+            // Ping/Pong
+            socket.on('pong', () => {
+                log('🏓 Pong recibido', 'success');
+            });
+
+            // Eventos generales
+            socket.onAny((eventName, ...args) => {
+                log(`📡 Evento recibido: ${eventName} - ${JSON.stringify(args)}`);
+            });
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+                log('🔌 Desconectado manualmente');
+                updateStatus('disconnected', '❌ Desconectado');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            }
+        }
+
+        function authenticate() {
+            if (!socket || !socket.connected) {
+                log('❌ No hay conexión activa', 'error');
+                return;
+            }
+
+            const authData = {
+                userId: 1,
+                token: 'test_token_123',
+                role: 'doctor'
+            };
+
+            log(`🔐 Enviando autenticación: ${JSON.stringify(authData)}`);
+            socket.emit('authenticate', authData);
+        }
+
+        function sendPing() {
+            if (!socket || !socket.connected) {
+                log('❌ No hay conexión activa', 'error');
+                return;
+            }
+
+            log('🏓 Enviando ping...');
+            socket.emit('ping');
+        }
+
+        function clearLog() {
+            logDiv.innerHTML = '';
+        }
+
+        // Auto-conectar al cargar la página
+        window.onload = function() {
+            log('🚀 Página cargada. Listo para conectar.');
+            log('💡 Haz clic en "Conectar" para probar la conexión WebSocket');
+        };
+    </script>
+</body>
+</html>

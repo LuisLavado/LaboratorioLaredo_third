@@ -1,0 +1,662 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Http;
+use App\Models\User;
+use App\Models\Solicitud;
+use App\Models\Examen;
+use App\Models\ResultadoExamen;
+use App\Models\Paciente;
+use App\Models\CentroSalud;
+
+class AdminController extends Controller
+{    /**
+     * Dashboard de administración
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function dashboard(Request $request): JsonResponse
+    {
+        // Fechas para estadísticas
+        $hoy = now()->startOfDay();
+        $semanaAnterior = now()->subDays(7);
+        $mesAnterior = now()->subDays(30);
+
+        // Estadísticas de usuarios
+        $totalUsuarios = User::count();
+        $usuariosActivos = User::where('activo', true)->count();
+        $usuariosNuevosHoy = User::whereDate('created_at', $hoy)->count();
+        $usuariosNuevosSemana = User::where('created_at', '>=', $semanaAnterior)->count();
+
+        // Estadísticas por rol
+        $doctores = User::where('role', 'doctor')->where('activo', true)->count();
+        $tecnicos = User::where('role', 'laboratorio')->where('activo', true)->count();
+        $administradores = User::where('role', 'administrador')->where('activo', true)->count();        // Actividad reciente (accesos)
+        $accesosHoy = User::whereDate('ultimo_acceso', $hoy)->count();
+        $accesosSemana = User::where('ultimo_acceso', '>=', $semanaAnterior)->count();
+
+        // Estadísticas de solicitudes
+        $totalSolicitudes = Solicitud::count();
+        $solicitudesHoy = Solicitud::whereDate('created_at', $hoy)->count();
+        $solicitudesSemana = Solicitud::where('created_at', '>=', $semanaAnterior)->count();
+        $solicitudesPendientes = Solicitud::where('estado', 'pendiente')->count();
+
+        // Estadísticas de exámenes
+        $totalExamenes = Examen::where('activo', true)->count();
+        $examenesHoy = ResultadoExamen::whereDate('created_at', $hoy)->count();
+        $examenesPendientes = Solicitud::where('estado', 'en_proceso')->count();
+
+        // Estadísticas de pacientes
+        $totalPacientes = Paciente::count();
+        $pacientesNuevosHoy = Paciente::whereDate('created_at', $hoy)->count();
+
+        // Usuarios conectados desde WebSocket
+        $usuariosConectados = 0;
+        try {
+            $response = Http::timeout(5)->get('http://3.14.3.69:3002/api/admin/connected-users');
+            if ($response->successful()) {
+                $wsData = $response->json();
+                $usuariosConectados = $wsData['data']['total'] ?? 0;
+            }
+        } catch (\Exception $e) {
+            // Ignorar errores de WebSocket
+        }        $data = [
+            'stats' => [
+                'usuarios_totales' => $totalUsuarios,
+                'usuarios_activos' => $usuariosActivos,
+                'usuarios_conectados' => $usuariosConectados,
+                'usuarios_en_linea' => $usuariosConectados, // Alias para compatibilidad
+                'doctores' => $doctores,
+                'tecnicos' => $tecnicos,
+                'administradores' => $administradores,
+                'usuarios_nuevos_hoy' => $usuariosNuevosHoy,
+                'usuarios_nuevos_semana' => $usuariosNuevosSemana,
+                'accesos_hoy' => $accesosHoy,
+                'accesos_semana' => $accesosSemana,
+                'solicitudes_totales' => $totalSolicitudes,
+                'solicitudes_hoy' => $solicitudesHoy,
+                'solicitudes_semana' => $solicitudesSemana,
+                'solicitudes_pendientes' => $solicitudesPendientes,
+                'examenes_activos' => $totalExamenes,
+                'examenes_hoy' => $examenesHoy,
+                'examenes_pendientes' => $examenesPendientes,
+                'pacientes_totales' => $totalPacientes,
+                'pacientes_nuevos_hoy' => $pacientesNuevosHoy
+            ],
+            'actividad_reciente' => $this->getActividadReciente(),
+            'usuarios_por_dia' => $this->getUsuariosPorDia(),
+            'accesos_por_dia' => $this->getAccesosPorDia(),
+            'solicitudes_por_dia' => $this->getSolicitudesPorDia()
+        ];
+
+        return response()->json($data);
+    }    /**
+     * Obtener actividad reciente del sistema
+     */
+    private function getActividadReciente()
+    {
+        $actividades = [];
+
+        // Últimos usuarios registrados
+        $usuariosRecientes = User::orderBy('created_at', 'desc')
+            ->limit(5)
+            ->get(['id', 'nombre', 'apellido', 'role', 'created_at'])
+            ->map(function ($user) {
+                return [
+                    'tipo' => 'registro',
+                    'descripcion' => "Nuevo usuario registrado: {$user->nombre} {$user->apellido} ({$user->role})",
+                    'fecha' => $user->created_at,
+                    'usuario' => $user
+                ];
+            });
+
+        // Últimos accesos
+        $accesosRecientes = User::whereNotNull('ultimo_acceso')
+            ->orderBy('ultimo_acceso', 'desc')
+            ->limit(5)
+            ->get(['id', 'nombre', 'apellido', 'role', 'ultimo_acceso'])
+            ->map(function ($user) {
+                return [
+                    'tipo' => 'acceso',
+                    'descripcion' => "Acceso al sistema: {$user->nombre} {$user->apellido} ({$user->role})",
+                    'fecha' => $user->ultimo_acceso,
+                    'usuario' => $user
+                ];
+            });
+
+        // Últimas solicitudes
+        $solicitudesRecientes = Solicitud::with(['user', 'paciente'])
+            ->orderBy('created_at', 'desc')
+            ->limit(5)
+            ->get()
+            ->map(function ($solicitud) {
+                $usuario = $solicitud->user;
+                $paciente = $solicitud->paciente;
+                return [
+                    'tipo' => 'solicitud',
+                    'descripcion' => "Nueva solicitud por {$usuario->nombre} {$usuario->apellido} para {$paciente->nombres} {$paciente->apellidos}",
+                    'fecha' => $solicitud->created_at,
+                    'usuario' => $usuario,
+                    'solicitud' => $solicitud
+                ];
+            });
+
+        // Combinar y ordenar actividades
+        $actividades = $usuariosRecientes->concat($accesosRecientes)
+            ->concat($solicitudesRecientes)
+            ->sortByDesc('fecha')
+            ->take(15)
+            ->values();
+
+        return $actividades;
+    }
+
+    /**
+     * Obtener estadísticas de usuarios por día (últimos 7 días)
+     */
+    private function getUsuariosPorDia()
+    {
+        $datos = [];
+        for ($i = 6; $i >= 0; $i--) {
+            $fecha = now()->subDays($i)->startOfDay();
+            $count = User::whereDate('created_at', $fecha)->count();
+            $datos[] = [
+                'fecha' => $fecha->format('Y-m-d'),
+                'dia' => $fecha->format('D'),
+                'usuarios' => $count
+            ];
+        }
+        return $datos;
+    }    /**
+     * Obtener estadísticas de accesos por día (últimos 7 días)
+     */
+    private function getAccesosPorDia()
+    {
+        $datos = [];
+        for ($i = 6; $i >= 0; $i--) {
+            $fecha = now()->subDays($i)->startOfDay();
+            $count = User::whereDate('ultimo_acceso', $fecha)->count();
+            $datos[] = [
+                'fecha' => $fecha->format('Y-m-d'),
+                'dia' => $fecha->format('D'),
+                'accesos' => $count
+            ];
+        }
+        return $datos;
+    }
+
+    /**
+     * Obtener estadísticas de solicitudes por día (últimos 7 días)
+     */
+    private function getSolicitudesPorDia()
+    {
+        $datos = [];
+        for ($i = 6; $i >= 0; $i--) {
+            $fecha = now()->subDays($i)->startOfDay();
+            $count = Solicitud::whereDate('created_at', $fecha)->count();
+            $datos[] = [
+                'fecha' => $fecha->format('Y-m-d'),
+                'dia' => $fecha->format('D'),
+                'solicitudes' => $count
+            ];
+        }
+        return $datos;
+    }/**
+     * Obtener usuarios en línea
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function usuariosEnLinea(Request $request): JsonResponse
+    {
+        // Solicitar lista de usuarios conectados al WebSocket server
+        try {
+            // Intentar consultar el socket server en AWS para obtener usuarios conectados
+            $response = Http::timeout(5)->get('http://3.14.3.69:3002/api/connected-users');
+            
+            if ($response->successful()) {
+                return response()->json([
+                    'usuarios' => $response->json('users') ?? []
+                ]);
+            }
+            
+            // Si no se puede conectar al servidor WebSocket, devolver lista vacía
+            return response()->json([
+                'usuarios' => [],
+                'message' => 'No se pudo conectar al servidor WebSocket'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'usuarios' => [],
+                'error' => 'Error consultando usuarios en línea: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * Listar todos los usuarios
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function usuarios(Request $request): JsonResponse
+    {
+        $usuarios = User::orderBy('created_at', 'desc')->get();
+        
+        return response()->json([
+            'usuarios' => $usuarios
+        ]);
+    }
+
+    /**
+     * Crear un nuevo usuario
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function crearUsuario(Request $request): JsonResponse
+    {
+        // Validación básica
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users',
+            'role' => 'required|string|in:administrador,laboratorio,doctor,paciente',
+            'password' => 'required|string|min:8',
+        ]);
+
+        $user = User::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'role' => $request->role,
+            'password' => bcrypt($request->password),
+        ]);
+
+        return response()->json([
+            'message' => 'Usuario creado exitosamente',
+            'user' => $user
+        ], 201);
+    }
+
+    /**
+     * Actualizar un usuario existente
+     *
+     * @param Request $request
+     * @param int $id
+     * @return JsonResponse
+     */
+    public function actualizarUsuario(Request $request, $id): JsonResponse
+    {
+        $user = User::findOrFail($id);
+        
+        // Validación básica
+        $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'email' => 'sometimes|string|email|max:255|unique:users,email,'.$id,
+            'role' => 'sometimes|string|in:administrador,laboratorio,doctor,paciente',
+            'password' => 'sometimes|string|min:8|nullable',
+        ]);
+
+        // Actualizar campos
+        if ($request->has('name')) $user->name = $request->name;
+        if ($request->has('email')) $user->email = $request->email;
+        if ($request->has('role')) $user->role = $request->role;
+        if ($request->has('password') && $request->password) {
+            $user->password = bcrypt($request->password);
+        }
+        
+        $user->save();
+
+        return response()->json([
+            'message' => 'Usuario actualizado exitosamente',
+            'user' => $user
+        ]);
+    }
+
+    /**
+     * Desactivar un usuario
+     *
+     * @param Request $request
+     * @param int $id
+     * @return JsonResponse
+     */
+    public function desactivarUsuario(Request $request, $id): JsonResponse
+    {
+        $user = User::findOrFail($id);
+        $user->status = 'inactive';
+        $user->save();
+
+        return response()->json([
+            'message' => 'Usuario desactivado exitosamente',
+            'user' => $user
+        ]);
+    }
+
+    /**
+     * Activar un usuario
+     *
+     * @param Request $request
+     * @param int $id
+     * @return JsonResponse
+     */
+    public function activarUsuario(Request $request, $id): JsonResponse
+    {
+        $user = User::findOrFail($id);
+        $user->status = 'active';
+        $user->save();
+
+        return response()->json([
+            'message' => 'Usuario activado exitosamente',
+            'user' => $user
+        ]);
+    }
+      /**
+     * Cerrar sesión de un usuario
+     *
+     * @param Request $request
+     * @param int $id
+     * @return JsonResponse
+     */
+    public function cerrarSesionUsuario(Request $request, $id): JsonResponse
+    {
+        $user = User::findOrFail($id);
+        
+        // Revocar tokens del usuario
+        $user->tokens()->delete();
+
+        return response()->json([
+            'message' => 'Sesión del usuario cerrada exitosamente'
+        ]);
+    }
+
+    /**
+     * Obtener actividades de usuarios por fecha
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function actividadesPorFecha(Request $request): JsonResponse
+    {
+        $fechaInicio = $request->input('fecha_inicio', now()->subDays(7)->format('Y-m-d'));
+        $fechaFin = $request->input('fecha_fin', now()->format('Y-m-d'));
+        $usuarioId = $request->input('usuario_id');
+
+        $query = User::query();
+
+        if ($usuarioId) {
+            $query->where('id', $usuarioId);
+        }
+
+        // Actividades de registro
+        $registros = $query->clone()
+            ->whereBetween('created_at', [$fechaInicio . ' 00:00:00', $fechaFin . ' 23:59:59'])
+            ->get(['id', 'nombre', 'apellido', 'email', 'role', 'created_at'])
+            ->map(function ($user) {
+                return [
+                    'tipo' => 'registro',
+                    'usuario_id' => $user->id,
+                    'usuario_nombre' => $user->nombre . ' ' . $user->apellido,
+                    'usuario_email' => $user->email,
+                    'usuario_role' => $user->role,
+                    'descripcion' => 'Usuario registrado en el sistema',
+                    'fecha' => $user->created_at,
+                    'detalles' => [
+                        'email' => $user->email,
+                        'rol' => $user->role
+                    ]
+                ];
+            });
+
+        // Actividades de acceso
+        $accesos = $query->clone()
+            ->whereNotNull('ultimo_acceso')
+            ->whereBetween('ultimo_acceso', [$fechaInicio . ' 00:00:00', $fechaFin . ' 23:59:59'])
+            ->get(['id', 'nombre', 'apellido', 'email', 'role', 'ultimo_acceso'])
+            ->map(function ($user) {
+                return [
+                    'tipo' => 'acceso',
+                    'usuario_id' => $user->id,
+                    'usuario_nombre' => $user->nombre . ' ' . $user->apellido,
+                    'usuario_email' => $user->email,
+                    'usuario_role' => $user->role,
+                    'descripcion' => 'Acceso al sistema',
+                    'fecha' => $user->ultimo_acceso,
+                    'detalles' => [
+                        'ip' => '127.0.0.1', // Podrías guardar la IP real
+                        'dispositivo' => 'Web'
+                    ]
+                ];
+            });
+
+        // Combinar y ordenar todas las actividades
+        $actividades = $registros->concat($accesos)
+            ->sortByDesc('fecha')
+            ->values();
+
+        return response()->json([
+            'actividades' => $actividades,
+            'resumen' => [
+                'total_actividades' => $actividades->count(),
+                'registros' => $registros->count(),
+                'accesos' => $accesos->count(),
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin
+            ]
+        );
+    }
+
+    /**
+     * Obtener estadísticas detalladas de un usuario
+     *
+     * @param Request $request
+     * @param int $id
+     * @return JsonResponse
+     */
+    public function estadisticasUsuario(Request $request, $id): JsonResponse
+    {
+        $user = User::findOrFail($id);
+
+        // Calcular días desde registro
+        $diasDesdeRegistro = $user->created_at->diffInDays(now());
+        
+        // Calcular días desde último acceso
+        $diasDesdeUltimoAcceso = $user->ultimo_acceso 
+            ? $user->ultimo_acceso->diffInDays(now())
+            : null;        // Estado de conexión actual (desde WebSocket)
+        $estadoConexion = 'desconectado';
+        try {
+            $response = Http::timeout(5)->get('http://3.14.3.69:3002/api/admin/connected-users');
+            if ($response->successful()) {
+                $wsData = $response->json();
+                $usuariosConectados = $wsData['data']['usuarios'] ?? [];
+                
+                foreach ($usuariosConectados as $userWs) {
+                    if ($userWs['id'] == $id) {
+                        $estadoConexion = 'conectado';
+                        break;
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            // Ignorar errores de WebSocket
+        }
+
+        // Estadísticas de solicitudes del usuario
+        $totalSolicitudes = Solicitud::where('user_id', $id)->count();
+        $solicitudesPendientes = Solicitud::where('user_id', $id)->where('estado', 'pendiente')->count();
+        $solicitudesCompletadas = Solicitud::where('user_id', $id)->where('estado', 'completado')->count();
+        $solicitudesHoy = Solicitud::where('user_id', $id)->whereDate('created_at', now())->count();
+
+        return response()->json([
+            'usuario' => [
+                'id' => $user->id,
+                'nombre' => $user->nombre,
+                'apellido' => $user->apellido,
+                'email' => $user->email,
+                'role' => $user->role,
+                'activo' => $user->activo,
+                'fecha_registro' => $user->created_at,
+                'ultimo_acceso' => $user->ultimo_acceso,
+                'estado_conexion' => $estadoConexion
+            ],            'estadisticas' => [
+                'dias_desde_registro' => $diasDesdeRegistro,
+                'dias_desde_ultimo_acceso' => $diasDesdeUltimoAcceso,
+                'total_solicitudes' => $totalSolicitudes,
+                'solicitudes_completadas' => $solicitudesCompletadas,
+                'solicitudes_pendientes' => $solicitudesPendientes,
+                'solicitudes_hoy' => $solicitudesHoy
+            ],
+            'actividad_reciente' => [
+                'accesos_ultima_semana' => $user->ultimo_acceso && $user->ultimo_acceso->gte(now()->subWeek()) ? 1 : 0,
+                'accesos_ultimo_mes' => $user->ultimo_acceso && $user->ultimo_acceso->gte(now()->subMonth()) ? 1 : 0,
+            ]
+        ]);
+    }
+
+    /**
+     * Obtener resumen de actividades por día en un rango de fechas
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function resumenPorDia(Request $request): JsonResponse
+    {
+        $fechaInicio = $request->input('fecha_inicio', now()->subDays(30)->format('Y-m-d'));
+        $fechaFin = $request->input('fecha_fin', now()->format('Y-m-d'));
+
+        $datos = [];
+        $fechaActual = \Carbon\Carbon::parse($fechaInicio);
+        $fechaFinal = \Carbon\Carbon::parse($fechaFin);        while ($fechaActual->lte($fechaFinal)) {
+            $fecha = $fechaActual->format('Y-m-d');
+            
+            $registros = User::whereDate('created_at', $fecha)->count();
+            $accesos = User::whereDate('ultimo_acceso', $fecha)->count();
+            $solicitudes = Solicitud::whereDate('created_at', $fecha)->count();
+
+            $datos[] = [
+                'fecha' => $fecha,
+                'dia_semana' => $fechaActual->format('l'),
+                'dia_mes' => $fechaActual->format('d'),
+                'mes' => $fechaActual->format('M'),
+                'registros' => $registros,
+                'accesos' => $accesos,
+                'solicitudes' => $solicitudes,
+                'total_actividades' => $registros + $accesos + $solicitudes
+            ];
+
+            $fechaActual->addDay();
+        }
+
+        return response()->json([
+            'datos' => $datos,
+            'resumen' => [
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin,
+                'total_registros' => array_sum(array_column($datos, 'registros')),
+                'total_accesos' => array_sum(array_column($datos, 'accesos')),
+                'total_solicitudes' => array_sum(array_column($datos, 'solicitudes')),
+                'total_actividades' => array_sum(array_column($datos, 'total_actividades'))
+            ]
+        ]);
+    }
+
+    /**
+     * Obtener actividades detalladas por usuario y fecha
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function actividadesDetalladas(Request $request): JsonResponse
+    {
+        $userId = $request->input('user_id');
+        $fechaInicio = $request->input('fecha_inicio', now()->subDays(30)->format('Y-m-d'));
+        $fechaFin = $request->input('fecha_fin', now()->format('Y-m-d'));
+
+        $actividades = [];
+
+        // Actividades del usuario específico o todos los usuarios
+        $userQuery = $userId ? User::where('id', $userId) : User::query();
+
+        // Obtener accesos por fecha
+        $accesos = $userQuery->clone()
+            ->whereNotNull('ultimo_acceso')
+            ->whereBetween('ultimo_acceso', [$fechaInicio, $fechaFin])
+            ->get(['id', 'nombre', 'apellido', 'email', 'role', 'ultimo_acceso'])
+            ->map(function ($user) {
+                return [
+                    'tipo' => 'acceso',
+                    'fecha' => $user->ultimo_acceso,
+                    'descripcion' => "Acceso al sistema",
+                    'usuario' => [
+                        'id' => $user->id,
+                        'nombre' => $user->nombre,
+                        'apellido' => $user->apellido,
+                        'email' => $user->email,
+                        'role' => $user->role
+                    ]
+                ];
+            });
+
+        // Obtener solicitudes del usuario en el período
+        $solicitudesQuery = Solicitud::with(['user', 'paciente'])
+            ->whereBetween('created_at', [$fechaInicio, $fechaFin]);
+
+        if ($userId) {
+            $solicitudesQuery->where('user_id', $userId);
+        }
+
+        $solicitudes = $solicitudesQuery->get()->map(function ($solicitud) {
+            return [
+                'tipo' => 'solicitud',
+                'fecha' => $solicitud->created_at,
+                'descripcion' => "Solicitud creada para paciente: " . 
+                    ($solicitud->paciente->nombres ?? 'N/A') . " " . 
+                    ($solicitud->paciente->apellidos ?? ''),
+                'detalles' => [
+                    'solicitud_id' => $solicitud->id,
+                    'numero_recibo' => $solicitud->numero_recibo,
+                    'estado' => $solicitud->estado,
+                    'paciente' => $solicitud->paciente->nombres . " " . $solicitud->paciente->apellidos
+                ],
+                'usuario' => [
+                    'id' => $solicitud->user->id,
+                    'nombre' => $solicitud->user->nombre,
+                    'apellido' => $solicitud->user->apellido,
+                    'email' => $solicitud->user->email,
+                    'role' => $solicitud->user->role
+                ]
+            ];
+        });
+
+        // Combinar todas las actividades
+        $todasActividades = $accesos->concat($solicitudes)
+            ->sortByDesc('fecha')
+            ->take(100)
+            ->values();
+
+        // Agrupar por día
+        $actividadesPorDia = $todasActividades->groupBy(function ($actividad) {
+            return \Carbon\Carbon::parse($actividad['fecha'])->format('Y-m-d');
+        });
+
+        // Resumen por tipo de actividad
+        $resumen = [
+            'total_actividades' => $todasActividades->count(),
+            'accesos' => $accesos->count(),
+            'solicitudes' => $solicitudes->count(),
+            'periodo' => [
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin
+            ]
+        ];
+
+        return response()->json([
+            'actividades' => $todasActividades,
+            'actividades_por_dia' => $actividadesPorDia,
+            'resumen' => $resumen
+        ]);
+    }
+}

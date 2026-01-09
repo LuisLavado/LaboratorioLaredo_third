@@ -1,0 +1,165 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: laravel-backend
+    restart: unless-stopped
+    environment:
+      # Laravel Core
+      - APP_NAME=LaboratorioLaredo
+      - APP_ENV=production
+      - APP_KEY=${APP_KEY:-base64:PRw/JxKHyyo5o9G96z5jBimA56MVWmj6pYOfgBpU4ak=}
+      - APP_DEBUG=false
+      - APP_URL=https://labbackend.shiroharu.me
+      
+      # Database
+      - DB_CONNECTION=mysql
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_DATABASE=${DB_DATABASE:-laboratoriolaredo}
+      - DB_USERNAME=${DB_USERNAME:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-root}
+      
+      # Session
+      - SESSION_DRIVER=database
+      - SESSION_LIFETIME=120
+      - SESSION_ENCRYPT=false
+      - SESSION_DOMAIN=.shiroharu.me
+      
+      # Sanctum
+      - SANCTUM_STATEFUL_DOMAINS=lab.shiroharu.me,labbackend.shiroharu.me
+      
+      # Broadcasting
+      - BROADCAST_CONNECTION=reverb
+      
+      # Laravel Reverb (WebSocket)
+      - REVERB_APP_ID=${REVERB_APP_ID:-176084}
+      - REVERB_APP_KEY=${REVERB_APP_KEY:-ynws9ha5gsf0proyy0vk}
+      - REVERB_APP_SECRET=${REVERB_APP_SECRET:-tfr6xjwhhuh8wfqh3k1h}
+      - REVERB_HOST=labbackend.shiroharu.me
+      - REVERB_PORT=443
+      - REVERB_SCHEME=https
+      - REVERB_SERVER_HOST=0.0.0.0
+      - REVERB_SERVER_PORT=8080
+      
+      # Cache & Queue
+      - CACHE_STORE=database
+      - QUEUE_CONNECTION=sync
+      
+      # Filesystem
+      - FILESYSTEM_DISK=local
+      
+      # Logging
+      - LOG_CHANNEL=stack
+      - LOG_STACK=single
+      - LOG_LEVEL=info
+      
+      # Mail
+      - MAIL_MAILER=log
+      - MAIL_FROM_ADDRESS=noreply@shiroharu.me
+      - MAIL_FROM_NAME=LaboratorioLaredo
+      
+      # Vite (para generar assets)
+      - VITE_REVERB_APP_KEY=${REVERB_APP_KEY:-ynws9ha5gsf0proyy0vk}
+      - VITE_REVERB_HOST=labbackend.shiroharu.me
+      - VITE_REVERB_PORT=443
+      - VITE_REVERB_SCHEME=https
+    
+    volumes:
+      - storage_data:/var/www/html/storage
+      - bootstrap_cache:/var/www/html/bootstrap/cache
+    
+    networks:
+      - lab_network
+    
+    depends_on:
+      - mysql
+    
+    labels:
+      # Traefik labels para API (puerto 8000)
+      - "traefik.enable=true"
+      
+      # Router para API
+      - "traefik.http.routers.lab-api.rule=Host(`labbackend.shiroharu.me`) && PathPrefix(`/api`, `/sanctum`, `/broadcasting`, `/storage`)"
+      - "traefik.http.routers.lab-api.entrypoints=websecure"
+      - "traefik.http.routers.lab-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.lab-api.service=lab-api"
+      - "traefik.http.services.lab-api.loadbalancer.server.port=8000"
+      
+      # Router para WebSocket (puerto 8080)
+      - "traefik.http.routers.lab-ws.rule=Host(`labbackend.shiroharu.me`) && PathPrefix(`/app`)"
+      - "traefik.http.routers.lab-ws.entrypoints=websecure"
+      - "traefik.http.routers.lab-ws.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.lab-ws.service=lab-ws"
+      - "traefik.http.services.lab-ws.loadbalancer.server.port=8080"
+      
+      # Middleware CORS
+      - "traefik.http.middlewares.lab-cors.headers.accesscontrolallowmethods=GET,POST,PUT,DELETE,PATCH,OPTIONS"
+      - "traefik.http.middlewares.lab-cors.headers.accesscontrolalloworiginlist=https://lab.shiroharu.me"
+      - "traefik.http.middlewares.lab-cors.headers.accesscontrolallowcredentials=true"
+      - "traefik.http.middlewares.lab-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With,Accept,Origin"
+      - "traefik.http.middlewares.lab-cors.headers.accesscontrolmaxage=3600"
+      
+      # Aplicar middleware CORS a ambos routers
+      - "traefik.http.routers.lab-api.middlewares=lab-cors"
+      - "traefik.http.routers.lab-ws.middlewares=lab-cors"
+
+  mysql:
+    image: mysql:5.7
+    container_name: mysql-laboratorio
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_PASSWORD:-root}
+      - MYSQL_DATABASE=${DB_DATABASE:-laboratoriolaredo}
+      - MYSQL_USER=${DB_USERNAME:-labuser}
+      - MYSQL_PASSWORD=${DB_PASSWORD:-root}
+      - TZ=America/Lima
+    
+    volumes:
+      - mysql_data:/var/lib/mysql
+    
+    networks:
+      - lab_network
+    
+    command: 
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max_connections=200
+      - --innodb_buffer_pool_size=256M
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=https://labbackend.shiroharu.me/api
+        - VITE_BACKEND_URL=https://labbackend.shiroharu.me
+        - VITE_REVERB_HOST=labbackend.shiroharu.me
+        - VITE_REVERB_PORT=443
+        - VITE_REVERB_SCHEME=https
+        - VITE_REVERB_APP_KEY=${REVERB_APP_KEY:-ynws9ha5gsf0proyy0vk}
+    container_name: react-frontend
+    restart: unless-stopped
+    networks:
+      - lab_network
+    labels:
+      # Traefik labels para Frontend
+      - "traefik.enable=true"
+      - "traefik.http.routers.lab-frontend.rule=Host(`lab.shiroharu.me`)"
+      - "traefik.http.routers.lab-frontend.entrypoints=websecure"
+      - "traefik.http.routers.lab-frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.lab-frontend.loadbalancer.server.port=80"
+
+networks:
+  lab_network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+    driver: local
+  storage_data:
+    driver: local
+  bootstrap_cache:
+    driver: local
